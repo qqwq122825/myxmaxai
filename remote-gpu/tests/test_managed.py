@@ -88,5 +88,44 @@ def test_manual_fields_preserve_certificate_pin_and_reject_plain_http(tmp_path):
     for address in ("http://example.com:8766", "https://example.com/path", "https://user:pass@example.com"):
         with pytest.raises(ValueError):
             pairing_from_fields(address, identity.key, identity.fingerprint)
-    with pytest.raises(ValueError, match="导入"):
+    with pytest.raises(ValueError, match="Key"):
         pairing_from_fields("127.0.0.1:8766", identity.key, "")
+
+
+def test_single_key_works_without_pairing_or_fingerprint_and_survives_address_changes(tmp_path):
+    from rgpu.pairing import ConnectionKey
+    identity = load_identity(tmp_path)
+    token = identity.connection_key
+    assert token.startswith("RGK1.")
+    assert identity.connection_key == load_identity(tmp_path).connection_key
+    credential = ConnectionKey.decode(token)
+    assert identity.key not in repr(credential)
+    for address, host, port in (("127.0.0.1", "127.0.0.1", 8766),
+                                ("example.com:24567", "example.com", 24567)):
+        pair = pairing_from_fields(address, token)
+        assert pair == identity.pairing(host, port)
+    with pytest.raises(ValueError) as result:
+        ConnectionKey.decode("SENSITIVE_BUT_INVALID_KEY")
+    assert "SENSITIVE_BUT_INVALID_KEY" not in str(result.value)
+
+
+async def test_single_key_tls_connection_and_invalid_pin_rejected(tmp_path):
+    from rgpu.pairing import ConnectionKey
+    agent, runner, original = await server(tmp_path)
+    stop, samples = asyncio.Event(), []
+    key = agent.identity.connection_key
+    pair = pairing_from_fields(original.endpoint, key)
+    def stats(value):
+        samples.append(value)
+        stop.set()
+    try:
+        bad_key = ConnectionKey(agent.identity.key, "0" * 64).encode()
+        with pytest.raises(ConnectionError, match="证书"):
+            await connect_direct(pairing_from_fields(original.endpoint, bad_key), "test",
+                                 VideoSettings(320, 240, 15, 1000), stop, "none")
+        await asyncio.wait_for(connect_direct(pair, "test", VideoSettings(320, 240, 15, 1000),
+                                             stop, "none", statistics=stats), 8)
+        assert samples and samples[-1]["input_fps"] > 0
+        assert not samples[-1]["return_active"]
+    finally:
+        await runner.cleanup()

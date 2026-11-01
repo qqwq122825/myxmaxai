@@ -37,8 +37,8 @@ def main():
                 if state == 0 and server.agent and server.generated_code.get() and local.devices:
                     pair = identity.pairing("127.0.0.1", port)
                     local.address.set(pair.endpoint)
-                    local.key.set(pair.key)
-                    local.fingerprint.set(pair.fingerprint)
+                    local.key.set(server.key.get())
+                    local.fingerprint.set("")
                     local.camera_box.current(0)
                     server.start()
                     state = 1
@@ -62,6 +62,7 @@ def main():
                                   "role_isolation": not hasattr(local, "window_box") and not hasattr(server, "camera_box"),
                                   "separate_config_keys": [local.role, server.role],
                                   "tls_roundtrip": True}
+                        result["address_and_key_only"] = local.key.get().startswith("RGK1.") and not local.fingerprint.get()
                         break
                 time.sleep(.02)
             if not result:
@@ -81,7 +82,8 @@ def main():
                 time.sleep(.03)
             result["loops_closed"] = not server.engine.thread.is_alive() and not local.engine.thread.is_alive()
         Path("reports").mkdir(exist_ok=True)
-        Path("reports/gui-workflow-030.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        from rgpu import __version__
+        Path(f"reports/gui-workflow-{__version__}.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         print(json.dumps(result, ensure_ascii=False))
         if not result.get("ok") or not result.get("loops_closed"):
             raise SystemExit(1)

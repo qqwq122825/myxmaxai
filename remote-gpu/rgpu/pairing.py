@@ -21,6 +21,38 @@ from .paths import reports_directory
 
 
 @dataclass(frozen=True, repr=False)
+class ConnectionKey:
+    """One copyable credential, independent of the server's address.
+
+    Carries the bearer secret and pinned TLS identity together so the user only
+    enters an address and a Key. No certificate bootstrap or skipped validation.
+    """
+    key: str
+    fingerprint: str
+
+    def __post_init__(self):
+        check_token(self.key)
+        if not isinstance(self.fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", self.fingerprint):
+            raise ValueError("连接 Key 中的服务器身份无效。")
+
+    def encode(self):
+        payload = bytes.fromhex(self.fingerprint) + self.key.encode("ascii")
+        return "RGK1." + base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    @classmethod
+    def decode(cls, value):
+        try:
+            value = value.strip()
+            if not value.startswith("RGK1.") or len(value) > 512:
+                raise ValueError()
+            raw = value[5:]
+            payload = base64.b64decode(raw + "=" * (-len(raw) % 4), altchars=b"-_", validate=True)
+            return cls(payload[32:].decode("ascii"), payload[:32].hex())
+        except (ValueError, TypeError, AttributeError, UnicodeError):
+            raise ValueError("连接 Key 无效，请复制新版服务器的完整 Key（RGK1. 开头）。") from None
+
+
+@dataclass(frozen=True, repr=False)
 class Pairing:
     host: str
     port: int
@@ -89,6 +121,10 @@ class ServerIdentity:
 
     def pairing(self, host, port):
         return Pairing(host, port, self.fingerprint, self.key)
+
+    @property
+    def connection_key(self):
+        return ConnectionKey(self.key, self.fingerprint).encode()
 
 
 def load_identity(directory=None):

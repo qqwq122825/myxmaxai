@@ -18,7 +18,7 @@ from .config import VideoSettings
 from .direct import connect_direct, serve_direct
 from .doctor import report, save_report
 from .media import fit_bgr, list_cameras, select_camera
-from .pairing import Pairing, load_identity
+from .pairing import ConnectionKey, Pairing, load_identity
 from .paths import reports_directory
 from .preview import preview_local
 from .runtime import (VirtualOutput, load_preferences, pairing_from_fields,
@@ -92,7 +92,7 @@ class Application(tk.Tk):
         self.method = tk.StringVar(value="Windows 图形采集（推荐）")
         self.crop_vars = [tk.StringVar(value="0") for _ in range(4)]
         self.use_input_vcam = tk.BooleanVar(value=bool(prefs.get("input_vcam", True)))
-        self.status = tk.StringVar(value="准备服务器接入配置……" if self.server else "先导入服务器连接配置，再启动本地推送。")
+        self.status = tk.StringVar(value="准备服务器 Key……" if self.server else "填写服务器地址和 Key，再点击“启动推送”。")
         self.capture_status = tk.StringVar(value="尚未采集结果")
         self.output_status = tk.StringVar(value="虚拟摄像头未开启")
         self.ip_status = tk.StringVar(value="自动识别公网出口 IP；可改为平台提供的入口地址。")
@@ -269,9 +269,9 @@ class Application(tk.Tk):
         self.key_entry = self.field(f, "连接 Key", self.key, secret=True)
         row = ttk.Frame(f)
         row.pack(fill="x", pady=(8, 0))
-        ttk.Button(row, text="导入连接配置", command=self.import_pairing).pack(side="left")
+        ttk.Button(row, text="粘贴 Key", command=self.paste_key).pack(side="left")
         ttk.Button(row, text="显示 / 隐藏 Key", command=self.show_key).pack(side="right")
-        self.help(f, "复制服务器的完整配对码，点击导入，可自动填入地址、Key 和证书校验。")
+        self.help(f, "只填服务器地址和 Key 即可。地址可写 IP:端口，不写端口时默认 8766。")
         f = self.section(2, "本地画面")
         self.camera_box = self.field(f, "采集来源", values=["测试画面"])
         self.camera_box.current(0)
@@ -292,11 +292,6 @@ class Application(tk.Tk):
         self.vcam_button.pack(fill="x")
         self.help(f, variable=self.output_status)
         self.help(f, "在直播伴侣中选择 FaceLive Camera。没有回传时输出黑色等待画面。")
-        self.advanced_open = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self.form, text="高级设置", variable=self.advanced_open, command=lambda: self.advanced.pack(fill="x") if self.advanced_open.get() else self.advanced.pack_forget()).pack(anchor="w", pady=(14, 0))
-        self.advanced = ttk.Frame(self.form)
-        self.field(self.advanced, "服务器证书 SHA-256 指纹", self.fingerprint)
-        self.help(self.advanced, "通常通过导入连接配置自动填写；不会跳过服务器身份验证。")
 
     def _server_form(self):
         f = self.section(1, "服务器接入")
@@ -313,9 +308,7 @@ class Application(tk.Tk):
         row.pack(fill="x", pady=(7, 0))
         ttk.Button(row, text="复制 Key", command=lambda: self.copy_text(self.key.get())).pack(side="left")
         ttk.Button(row, text="显示 / 隐藏", command=self.show_key).pack(side="right")
-        self.field(c, "配对码 / 连接配置", self.generated_code, secret=True, readonly=True)
-        ttk.Button(c, text="复制连接配置", command=self.copy_pairing, style="Primary.TButton").pack(fill="x", pady=(8, 0))
-        self.help(c, "IP 和 Key 准备好即可复制；点击“启动接收”后才开始监听。公网只需开放指定 TCP 端口。")
+        self.help(c, "本地端只填写服务器地址和这里的 Key，不需要配对码。Key 与本机服务器对应，修改 IP / 端口无需换 Key。")
         self.config_toggle = ttk.Button(f, text="收起连接设置", command=self.toggle_config)
         self.config_toggle.pack(fill="x", pady=(7, 0))
         f = self.section(2, "接收并提供换脸输入")
@@ -402,6 +395,21 @@ class Application(tk.Tk):
             self.emit("status", "已导入服务器地址、Key 和证书校验信息。")
         except (ValueError, tk.TclError) as ex:
             messagebox.showerror("无法导入", "请先在服务器复制完整的 RGPU1 配对码。" if isinstance(ex, tk.TclError) else str(ex), parent=self)
+
+    def paste_key(self):
+        try:
+            value = self.clipboard_get().strip()
+            if value.startswith("RGPU1."):
+                # Quiet compatibility for existing copied configurations.
+                pair = Pairing.decode(value)
+                value = ConnectionKey(pair.key, pair.fingerprint).encode()
+                self.address.set(pair.endpoint)
+            ConnectionKey.decode(value)
+            self.key.set(value)
+            self.fingerprint.set("")
+            self.emit("status", "Key 已填入；确认服务器地址后点击“启动推送”。")
+        except (ValueError, tk.TclError) as ex:
+            messagebox.showerror("无法粘贴 Key", "剪贴板没有可用的服务器 Key。" if isinstance(ex, tk.TclError) else str(ex), parent=self)
 
     def detect_ip(self, automatic=False):
         if automatic and self.public_host.get():
@@ -655,10 +663,10 @@ class Application(tk.Tk):
                     self.pending_tasks.discard(value)
                 elif kind == "prepared":
                     self.identity, self.agent = value
-                    self.key.set(self.identity.key)
+                    self.key.set(self.identity.connection_key)
                     self.update_pairing()
                     self.configure_output(self.settings)
-                    self.add_log("服务器 Key 和证书已准备；确认公网地址后可复制连接配置。")
+                    self.add_log("服务器 Key 已准备，点击“复制 Key”交给本地端即可。")
                 elif kind == "public_ip":
                     address, initial, automatic = value
                     if not automatic or self.public_host.get() == initial:

@@ -47,6 +47,9 @@ def main():
         archive.write(current / "SHA256SUMS", "RemoteGpu/SHA256SUMS")
     manifest = {"from": baseline, "to": version, "mode": "additive-overlay",
                 "requires_complete_baseline": True, "files": {name: hashes[name] for name in sorted(changed)}}
+    guide = "09-地址与单Key连接.md" if (current / "docs" / "09-地址与单Key连接.md").exists() else "08-独立双端与窗口采集.md"
+    firewall_note = ("服务器需重新运行 deploy\\开放直连端口.ps1，使入站规则指向新版服务器 EXE。\n"
+                     if baseline in ("0.1.1", "0.2.0") else "现有入站规则路径未变化，平台公网端口仍需保持开放。\n")
     with zipfile.ZipFile(patch_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
         for name, path in sorted(changed.items()):
             archive.write(path, "RemoteGpu/" + name)
@@ -56,8 +59,8 @@ def main():
             f"仅适用于已有完整 {baseline} 的 RemoteGpu 文件夹。\n"
             "先关闭旧程序，把压缩包里的 RemoteGpu 文件夹合并覆盖到原 RemoteGpu，保留原有 _internal 目录中的其余文件。\n"
             f"更新到 {version} 后，本地启动 RemoteGpuLocal.exe，服务器启动 RemoteGpuServer.exe。\n"
-            "这是两个独立界面，配置分别保存。服务器需重新运行 deploy\\开放直连端口.ps1，使入站规则指向新版服务器 EXE。\n"
-            "如果旧目录不完整或不是指定基线，请用完整发布包。详细步骤见 docs\\08-独立双端与窗口采集.md。\n"))
+            "这是两个独立界面，配置分别保存。" + firewall_note +
+            f"如果旧目录不完整或不是指定基线，请用完整发布包。详细步骤见 docs\\{guide}。\n"))
     # Validate the archives themselves, not only the source folder.
     for archive_path in (full_zip, patch_zip):
         with zipfile.ZipFile(archive_path) as archive:

@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 import numpy as np
 
 from .media import fit_bgr
-from .pairing import Pairing
+from .pairing import ConnectionKey, Pairing
 
 
 def preferences_path(role):
@@ -52,7 +52,11 @@ def public_ip():
     raise RuntimeError("公网 IP 自动检测失败。请填写租机平台显示的公网 IP 或域名。")
 
 
-def pairing_from_fields(address, key, fingerprint):
+def pairing_from_fields(address, key, fingerprint=""):
+    key = key.strip()
+    if key.startswith("RGK1."):
+        credential = ConnectionKey.decode(key)
+        key, fingerprint = credential.key, credential.fingerprint
     address = address.strip().rstrip("/")
     if not address.startswith("https://"):
         address = "https://" + address
@@ -64,8 +68,8 @@ def pairing_from_fields(address, key, fingerprint):
         return Pairing(parts.hostname, parts.port or 8766, fingerprint.strip().lower().replace(":", ""), key.strip())
     except ValueError as ex:
         if not fingerprint.strip():
-            raise ValueError("请先导入服务器连接配置；或在高级设置中填写服务器证书指纹。") from None
-        raise ValueError("服务器地址、Key 或证书指纹无效，请重新导入服务器连接配置。") from ex
+            raise ValueError("请复制新版服务器的完整 Key（RGK1. 开头），无需另外填写配对码。") from None
+        raise ValueError("服务器地址或 Key 无效，请检查地址和端口，并重新复制服务器 Key。") from ex
 
 
 class VirtualOutput:
