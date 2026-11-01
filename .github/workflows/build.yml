@@ -1,0 +1,79 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  XMAX_SDK_VERSION: "1.1.0"
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Download Xmax SDK packages
+        shell: pwsh
+        run: |
+          $base = "https://github.com/Xmax-AI/XmaxSDK-Windows/releases/download/$env:XMAX_SDK_VERSION"
+          $expected = @{
+            "Xmax.SDK.$env:XMAX_SDK_VERSION.nupkg"     = "47d4df84f3afd3bb1000dd4af0084ca81a22b5eb57c5d750e9113cc3b27ebc52"
+            "Xmax.SDK.Wpf.$env:XMAX_SDK_VERSION.nupkg" = "c1fc33b33ea7def2893a82182de48f639242135dd635d20f55613227e99d11e0"
+          }
+          foreach ($name in $expected.Keys) {
+            Invoke-WebRequest "$base/$name" -OutFile "packages/$name"
+            $hash = (Get-FileHash "packages/$name" -Algorithm SHA256).Hash.ToLower()
+            if ($hash -ne $expected[$name]) { throw "Checksum mismatch for $name" }
+          }
+
+      - name: Build virtual camera driver (x64 + x86)
+        shell: pwsh
+        run: |
+          foreach ($platform in @("x64", "Win32")) {
+            msbuild vcam/UnityCaptureFilter.vcxproj /m /nologo /v:minimal `
+              /p:Configuration=Release /p:Platform=$platform `
+              /p:PlatformToolset=v143 /p:WindowsTargetPlatformVersion=10.0
+            if ($LASTEXITCODE -ne 0) { throw "msbuild failed for $platform" }
+          }
+          Copy-Item vcam/Build/Release-UnityCaptureFilter64/UnityCaptureFilter64.dll app/VirtualCam/
+          Copy-Item vcam/Build/Release-UnityCaptureFilter32/UnityCaptureFilter32.dll app/VirtualCam/
+          Get-ChildItem app/VirtualCam
+
+      - name: Publish app
+        shell: pwsh
+        run: |
+          dotnet publish app/FaceLive.csproj -c Release -o out/FaceLive
+          if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
+          Remove-Item out/FaceLive/*.pdb -ErrorAction SilentlyContinue
+          Copy-Item "docs/使用说明.txt" out/FaceLive/
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path out/FaceLive -DestinationPath FaceLive-win-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FaceLive-win-x64
+          path: out/FaceLive
+          retention-days: 30
+
+      - name: Publish GitHub release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: FaceLive-win-x64.zip

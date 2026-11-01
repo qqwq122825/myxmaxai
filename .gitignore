@@ -1,0 +1,9 @@
+bin/
+obj/
+out/
+.build/
+vcam/Build/
+packages/*.nupkg
+app/VirtualCam/*.dll
+*.user
+.vs/
