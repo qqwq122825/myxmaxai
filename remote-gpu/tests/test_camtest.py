@@ -33,7 +33,9 @@ def test_clsids_match_the_driver():
     assert clsid_for_channel(1) == "{5C2CD55C-92AD-4999-8666-912BD3E70012}"   # FaceLive Camera #2 (as in doctor.py)
 
 
-def test_selftest_outside_windows_says_so():
+def test_selftest_outside_windows_says_so(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr("rgpu.camtest.os", SimpleNamespace(name="posix"))
     result = virtual_camera_selftest()
     assert not result.ok and "Windows" in result.verdict
     assert "结论" in result.text()

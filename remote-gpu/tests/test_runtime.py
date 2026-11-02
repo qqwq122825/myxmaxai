@@ -53,3 +53,34 @@ def test_virtual_camera_toggle_is_independent_and_stale_image_is_cleared(monkeyp
     finally:
         output.close()
     assert not output.thread.is_alive()
+
+
+def test_selfcheck_pattern_never_replaces_fresh_input_and_is_removed_after_check(monkeypatch):
+    from rgpu import unity
+    seen = []
+    class FakeCamera:
+        def __init__(self, *args): pass
+        def send(self, image):
+            seen.append(float(image.mean()))
+            return True
+        def close(self): pass
+    monkeypatch.setattr(unity, "UnityCamera", FakeCamera)
+    output = VirtualOutput(VideoSettings(320, 240, 30, 1000), 1)
+    def until(predicate):
+        deadline = time.monotonic() + 2
+        while not predicate() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert predicate()
+    try:
+        output.diagnostic_image(np.full((240, 320, 3), 60, np.uint8))
+        output.enabled = True
+        until(lambda: bool(seen) and seen[-1] == 60)
+        output.submit_image(np.full((240, 320, 3), 180, np.uint8))
+        assert output.has_fresh_input()
+        until(lambda: seen[-1] == 180)
+        output.diagnostic_image()  # Finish selfcheck; keep the real video flowing.
+        output.clear()
+        until(lambda: seen[-1] == 0)
+        assert not output.has_fresh_input()
+    finally:
+        output.close()

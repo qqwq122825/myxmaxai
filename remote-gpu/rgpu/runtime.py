@@ -79,6 +79,8 @@ class VirtualOutput:
         self.enabled = False
         self.written = 0
         self._latest = None
+        self._diagnostic = None
+        self._diagnostic_until = 0
         self._last = 0
         self._gate = threading.Lock()
         self.exit = threading.Event()
@@ -93,6 +95,16 @@ class VirtualOutput:
     def clear(self):
         with self._gate:
             self._latest, self._last = None, 0
+
+    def diagnostic_image(self, image=None):
+        """A temporary test image used only while no fresh real input is available."""
+        with self._gate:
+            self._diagnostic = None if image is None else image.copy()
+            self._diagnostic_until = time.monotonic() + 15 if image is not None else 0
+
+    def has_fresh_input(self):
+        with self._gate:
+            return self._latest is not None and time.monotonic() - self._last <= 1
 
     def _run(self):
         camera = None
@@ -114,6 +126,8 @@ class VirtualOutput:
                 if camera:
                     with self._gate:
                         image = self._latest if tick - self._last <= 1 else None
+                        if image is None and tick < self._diagnostic_until:
+                            image = self._diagnostic
                     try:
                         image = black if image is None else fit_bgr(image, self.settings.width, self.settings.height)
                         self.written += bool(camera.send(image))

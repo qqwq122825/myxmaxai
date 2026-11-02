@@ -13,6 +13,14 @@ if (-not $Uninstall) {
         if (-not (Test-Path -LiteralPath (Join-Path $driverSource $name))) { throw "驱动文件缺失：$name。请使用完整发布包。" }
     }
     New-Item -ItemType Directory -Force -Path $driverTarget | Out-Null
+    $backupRoot = Join-Path $driverTarget ('Backups\' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
+    foreach ($name in @('UnityCaptureFilter64.dll', 'UnityCaptureFilter32.dll')) {
+        $installed = Join-Path $driverTarget $name
+        if ((Test-Path -LiteralPath $installed) -and ((Get-FileHash -LiteralPath $installed).Hash -ne (Get-FileHash -LiteralPath (Join-Path $driverSource $name)).Hash)) {
+            New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+            Copy-Item -LiteralPath $installed -Destination (Join-Path $backupRoot $name) -Force
+        }
+    }
     Copy-Item -LiteralPath (Join-Path $driverSource 'UnityCaptureFilter64.dll') -Destination $driverTarget -Force
     Copy-Item -LiteralPath (Join-Path $driverSource 'UnityCaptureFilter32.dll') -Destination $driverTarget -Force
 }

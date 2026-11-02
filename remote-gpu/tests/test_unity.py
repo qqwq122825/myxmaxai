@@ -48,3 +48,27 @@ def test_real_shared_memory_channel_isolation_color_orientation_and_single_write
         for handle in handles:
             if handle:
                 k.CloseHandle(handle)
+
+
+def test_server_camera_resolution_does_not_overwrite_local_camera_settings(monkeypatch):
+    import winreg
+    from contextlib import contextmanager
+    paths, values = [], []
+    @contextmanager
+    def fake_key(root, path):
+        paths.append(path)
+        yield path
+    monkeypatch.setattr(winreg, "CreateKey", fake_key)
+    monkeypatch.setattr(winreg, "SetValueEx", lambda key, name, reserved, kind, value: values.append((key, name, value)))
+    prefix = "RemoteGpuConfigTest_" + uuid.uuid4().hex
+    server = UnityCamera(720, 1280, 1, prefix=prefix)
+    local = UnityCamera(1280, 720, 0, prefix=prefix)
+    try:
+        assert paths == [r"Software\FaceLive\VirtualCam\Channels\1", r"Software\FaceLive\VirtualCam"]
+        assert values[0][1:] == ("Width", 720)
+        assert values[1][1:] == ("Height", 1280)
+        assert values[2][1:] == ("Width", 1280)
+        assert values[3][1:] == ("Height", 720)
+    finally:
+        server.close()
+        local.close()

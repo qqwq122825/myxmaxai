@@ -42,6 +42,8 @@ def parser():
     camtest = sub.add_parser("camera-test", help="虚拟摄像头自检：写入测试画面并用 DirectShow / OpenCV / Media Foundation 读回")
     camtest.add_argument("--channel", type=int, default=1, help="1 = 服务器给换脸软件的 Camera #2（默认）；0 = 本地直播输出")
     camtest.add_argument("--report", default="reports/camera-selftest.json")
+    check = sub.add_parser("check-vcam", help="另开一个程序，只读取 FaceLive Camera #2，确认换脸软件能不能用")
+    check.add_argument("--smoke-report", help=argparse.SUPPRESS)
     test = sub.add_parser("selftest", help="不使用摄像头的本机 WebRTC 回环")
     test.add_argument("--seconds", type=int, default=6)
     test.add_argument("--report", default="reports/selftest.json")
@@ -206,12 +208,21 @@ async def async_main(args):
                              args.sink, args.ice_config, status=console, statistics=stats)
 
 
+def _checker_launch():
+    from rgpu.vcam_probe import launched_as_checker
+    return launched_as_checker()
+
+
 def main():
     args = parser().parse_args()
     report_root = reports_directory()
     logging.basicConfig(level=logging.WARNING,
                         handlers=[RotatingFileHandler(report_root / "remote-gpu.log", maxBytes=2_000_000,
                                                       backupCount=2, encoding="utf-8")])
+    if args.command == "check-vcam" or (args.command is None and _checker_launch()):
+        from rgpu.vcam_probe import launch_checker
+        launch_checker(getattr(args, "smoke_report", None) if args.command == "check-vcam" else None)
+        return
     if args.command == "preview-benchmark":
         from rgpu.preview_benchmark import run_preview_benchmark
         result = run_preview_benchmark(args.seconds, args.portrait, args.legacy)

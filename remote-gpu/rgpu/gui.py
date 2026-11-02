@@ -18,7 +18,7 @@ from . import __version__
 from .bridge import ManagedAgent, ResultSource
 from .config import VideoSettings
 from .direct import connect_direct, connect_viewer, serve_direct
-from .doctor import report, save_report
+from .doctor import report, save_report, input_driver_update_required
 from .media import fit_bgr, list_cameras, select_camera
 from .pairing import ConnectionKey, Pairing, load_identity
 from .paths import reports_directory
@@ -82,6 +82,9 @@ class Application(tk.Tk):
         self.images, self.labels, self.metric_vars = {}, {}, {}
         self.engine = EventLoop()
         self.identity = self.agent = self.virtual_output = None
+        self.vcam_reader = None
+        self.vcam_readers = set()
+        self.vcam_recheck_pending = False
         self.network_future = self.preview_future = None
         self.preview_task = None
         self.network_stop = self.preview_stop = None
@@ -104,7 +107,8 @@ class Application(tk.Tk):
         self.source_type = tk.StringVar(value="独立窗口")
         self.method = tk.StringVar(value="Windows 图形采集（推荐）")
         self.crop_vars = [tk.StringVar(value="0") for _ in range(4)]
-        self.use_input_vcam = tk.BooleanVar(value=bool(prefs.get("input_vcam", True)))
+        self.use_input_vcam = tk.BooleanVar(value=False)
+        self.input_vcam_status = tk.StringVar(value="尚未启动；点击后自动检查当前服务器镜像。")
         self.status = tk.StringVar(value="准备服务器 Key……" if self.server else "填写服务器地址和 Key，再点击“启动推送”。")
         self.capture_status = tk.StringVar(value="尚未采集结果")
         self.output_status = tk.StringVar(value="虚拟摄像头未开启")
@@ -258,7 +262,7 @@ class Application(tk.Tk):
         ttk.Checkbutton(logbar, text="运行日志", variable=self.log_open, command=self.toggle_logs).pack(side="left")
         ttk.Button(logbar, text="环境检测", command=self.diagnose).pack(side="right")
         if self.server:
-            ttk.Button(logbar, text="虚拟摄像头自检", command=self.camera_selftest).pack(side="right", padx=(0, 8))
+            ttk.Button(logbar, text="驱动测试（停止推流）", command=self.camera_selftest).pack(side="right", padx=(0, 8))
         self.logs = tk.Text(content, height=5, bg=WHITE, fg="#7285a1", font=("Consolas", 9), relief="flat", state="disabled")
         self.logs.grid(row=6, column=0, sticky="ew", pady=(4, 0))
         self.logs.grid_remove()
@@ -335,8 +339,18 @@ class Application(tk.Tk):
         self.config_toggle = ttk.Button(f, text="收起连接设置", command=self.toggle_config)
         self.config_toggle.pack(fill="x", pady=(7, 0))
         f = self.section(2, "接收并提供换脸输入")
-        ttk.Checkbutton(f, text="输入虚拟摄像头 · Camera #2", variable=self.use_input_vcam, command=self.toggle_input_virtual).pack(anchor="w")
+        self.input_vcam_start = ttk.Button(f, text="启动输入虚拟摄像头并自检", command=self.start_input_virtual, style="Primary.TButton")
+        self.input_vcam_start.pack(fill="x")
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=(7, 0))
+        self.input_vcam_stop = ttk.Button(row, text="停止虚拟摄像头", command=self.stop_input_virtual, state="disabled")
+        self.input_vcam_stop.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.input_vcam_recheck = ttk.Button(row, text="重新自检", command=self.check_input_virtual, state="disabled")
+        self.input_vcam_recheck.pack(side="left", fill="x", expand=True)
+        self.input_vcam_label = ttk.Label(f, textvariable=self.input_vcam_status, wraplength=280, justify="left", style="Muted.TLabel")
+        self.input_vcam_label.pack(fill="x", pady=(8, 0))
         self.help(f, "换脸软件的输入选择 FaceLive Camera #2；收到原画后持续输出。")
+        self.help(f, "没有原画时，短暂写入彩色测试图并读回；真实输入优先。自检后释放读取端，供换脸软件使用。")
         f = self.section(3, "采集结果并回传")
         self.result_group = f
         self.type_box = self.field(f, "结果来源", self.source_type, ["独立窗口", "结果虚拟摄像头", "原画回环（测试网络）", "测试画面（仅调试）"])
@@ -478,10 +492,16 @@ class Application(tk.Tk):
         enabled = self.virtual_output.enabled if self.virtual_output else (self.use_input_vcam.get() if self.server else False)
         if self.virtual_output and self.virtual_output.settings == settings:
             return
+        checking = self.vcam_reader is not None
+        if checking:
+            self.stop_input_check()
         if self.virtual_output:
             self.virtual_output.close()
         self.virtual_output = VirtualOutput(settings, 1 if self.server else 0, status=lambda s: self.emit("error", s))
         self.virtual_output.enabled = enabled
+        if checking and self.server and enabled:
+            self.input_vcam_result("输入规格已变化，正在重新检查虚拟摄像头……")
+            self.vcam_recheck_pending = True
 
     def toggle_virtual(self):
         try:
@@ -493,9 +513,103 @@ class Application(tk.Tk):
             self.emit("error", str(ex))
 
     def toggle_input_virtual(self):
-        self.configure_output(self.settings)
-        self.virtual_output.enabled = self.use_input_vcam.get()
+        self.start_input_virtual() if self.use_input_vcam.get() else self.stop_input_virtual()
+
+    def input_vcam_result(self, text, level="info"):
+        self.input_vcam_status.set(text)
+        self.input_vcam_label.configure(foreground={"ok": "#1f8a4c", "warn": "#9a6b12", "fail": "#c0392b"}.get(level, MUTED))
+
+    def start_input_virtual(self):
+        try:
+            self.configure_output(self.settings)
+            self.use_input_vcam.set(True)
+            self.virtual_output.enabled = True
+            self.save_settings()
+            self.check_input_virtual()
+        except Exception as ex:
+            self.input_vcam_result(f"启动失败：{ex}", "fail")
+
+    def stop_input_check(self):
+        reader, self.vcam_reader = self.vcam_reader, None
+        if reader:
+            reader.stop.set()
+            self.background(lambda: (reader.join(3), reader)[1], "vcam_reader_closed")
+        if self.virtual_output:
+            self.virtual_output.diagnostic_image()
+
+    def stop_input_virtual(self):
+        self.vcam_recheck_pending = False
+        self.stop_input_check()
+        self.use_input_vcam.set(False)
+        if self.virtual_output:
+            self.virtual_output.enabled = False
+        self.input_vcam_result("虚拟摄像头已停止；网络接收可继续。")
+        self.input_vcam_start.configure(state="disabled" if self.vcam_readers else "normal")
+        self.input_vcam_stop.configure(state="disabled")
+        self.input_vcam_recheck.configure(state="disabled")
         self.save_settings()
+
+    def check_input_virtual(self):
+        if self.closing or not self.virtual_output or not self.virtual_output.enabled or self.vcam_readers:
+            return
+        if input_driver_update_required():
+            self.stop_input_virtual()
+            text = "已安装的 Camera #2 驱动与新版不一致。请关闭换脸软件，以管理员运行 deploy\\install-driver.ps1，再启动自检。"
+            self.input_vcam_result(text, "fail")
+            self.add_log(text)
+            return
+        from .camtest import test_pattern
+        from .vcam_probe import _Reader
+        self.virtual_output.diagnostic_image(test_pattern(self.settings.width, self.settings.height))
+        reader = self.vcam_reader = _Reader()
+        self.vcam_readers.add(reader)
+        reader.start()
+        self.input_vcam_start.configure(state="disabled")
+        self.input_vcam_stop.configure(state="normal")
+        self.input_vcam_recheck.configure(state="disabled")
+        self.input_vcam_result("自检中：检查设备并读回画面（最多约 12 秒）……")
+        deadline = time.monotonic() + 12
+        written = self.virtual_output.written
+        self.after(100, lambda: self.poll_input_check(reader, deadline, written))
+
+    def poll_input_check(self, reader, deadline, written):
+        if self.closing or reader is not self.vcam_reader:
+            return
+        from .camtest import classify
+        with reader.lock:
+            frame, level, message = reader.frame, reader.level, reader.message
+        result = None
+        output = self.virtual_output
+        if not output or not output.enabled:
+            result = ("fail", "启动失败：虚拟摄像头写入端未开启，请查看运行日志。")
+        elif level == "fail":
+            result = ("fail", message)
+        elif frame is not None and output.written > written:
+            if classify(frame) == "ok":
+                result = ("ok", "自检通过：彩色测试图已写入 Camera #2 并成功读回，当前镜像可提供 DirectShow 虚拟摄像头。")
+            elif output.has_fresh_input() and level == "ok":
+                result = ("ok", "读回成功：Camera #2 正在提供输入画面。请用独立检查器核对内容，再在换脸软件中选择此设备。")
+        if result is None and time.monotonic() >= deadline:
+            result = ("warn", "自检未通过：" + message + "；可关闭其他摄像头读取程序后重试。")
+        if result:
+            self.stop_input_check()
+            level, text = result
+            self.input_vcam_result(text, level)
+            self.add_log("输入虚拟摄像头：" + text)
+            try:
+                path = reports_directory() / time.strftime("input-camera-check-%Y%m%d-%H%M%S.json")
+                save_report(path, {"app_version": __version__, "level": level, "message": text,
+                                   "device": "FaceLive Camera #2", "read_message": message,
+                                   "camera_writes_during_check": max(0, output.written - written) if output else 0})
+                self.add_log(f"自检报告：{path.resolve()}")
+            except OSError as ex:
+                self.add_log(f"无法保存自检报告：{ex}")
+            self.input_vcam_start.configure(state="disabled", text="启动输入虚拟摄像头并自检")
+            enabled = bool(output and output.enabled)
+            self.input_vcam_stop.configure(state="normal" if enabled else "disabled")
+            self.input_vcam_recheck.configure(state="disabled")
+        else:
+            self.after(100, lambda: self.poll_input_check(reader, deadline, written))
 
     def network_active(self):
         return self.network_future is not None and not self.network_future.done()
@@ -806,6 +920,15 @@ class Application(tk.Tk):
                 elif kind == "camtest":
                     self.add_log(value)
                     messagebox.showinfo("虚拟摄像头自检", value, parent=self)
+                elif kind == "vcam_reader_closed":
+                    self.vcam_readers.discard(value)
+                    if self.server and not self.vcam_readers:
+                        self.input_vcam_start.configure(state="normal")
+                        enabled = bool(self.virtual_output and self.virtual_output.enabled)
+                        self.input_vcam_recheck.configure(state="normal" if enabled else "disabled")
+                        if enabled and self.vcam_recheck_pending and not self.closing:
+                            self.vcam_recheck_pending = False
+                            self.check_input_virtual()
                 elif kind == "stats":
                     for key in ("input_fps", "return_fps", "rtt_ms"):
                         number = value.get(key)
@@ -862,6 +985,7 @@ class Application(tk.Tk):
         if self.closing:
             return
         self.closing = True
+        self.stop_input_check()
         with contextlib.suppress(Exception):
             self.save_settings()
         self.withdraw()
@@ -878,6 +1002,9 @@ class Application(tk.Tk):
                 await self.agent.stop_capture()
             if self.virtual_output:
                 await asyncio.to_thread(self.virtual_output.close)
+            for reader in list(self.vcam_readers):
+                reader.stop.set()
+                await asyncio.to_thread(reader.join, 3)
         future = self.engine.submit(cleanup())
         deadline = time.monotonic() + 15
         def check():

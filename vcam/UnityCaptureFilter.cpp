@@ -76,12 +76,15 @@ static struct { int width, height; } _media[] =
 	{    0,    0 }, //This slot is used for custom resolutions if requested by the target application
 };
 
-//FaceLive: the app writes the resolution the streamer picked to HKCU\Software\FaceLive\VirtualCam (Width/Height).
-//When present, the camera offers exactly that resolution so streaming software selects it automatically.
-static bool FaceLiveGetPreferredSize(int& w, int& h)
+// Channel 0 keeps its single preferred size for streaming applications. Other
+// channels offer the preferred size first, followed by the standard camera modes.
+static bool FaceLiveGetPreferredSize(int channel, int& w, int& h)
 {
 	HKEY key;
-	if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\FaceLive\\VirtualCam", 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
+	wchar_t path[128];
+	StringCchPrintfW(path, 128, L"Software\\FaceLive\\VirtualCam\\Channels\\%d", channel);
+	if (channel == 0 || RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_READ, &key) != ERROR_SUCCESS)
+		if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\FaceLive\\VirtualCam", 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
 	DWORD W = 0, H = 0, size = sizeof(DWORD), type = 0;
 	bool ok = (RegQueryValueExW(key, L"Width", NULL, &type, (LPBYTE)&W, &size) == ERROR_SUCCESS && type == REG_DWORD);
 	size = sizeof(DWORD);
@@ -91,15 +94,48 @@ static bool FaceLiveGetPreferredSize(int& w, int& h)
 	w = (int)(W & ~3u); h = (int)(H & ~1u);
 	return true;
 }
-static int FaceLiveMediaCount()
+static int FaceLiveMediaCount(int channel)
 {
 	int w, h;
-	return FaceLiveGetPreferredSize(w, h) ? 1 : (int)(sizeof(_media)/sizeof(_media[0]));
+	if (!FaceLiveGetPreferredSize(channel, w, h)) return (int)(sizeof(_media)/sizeof(_media[0]));
+	if (channel == 0) return 1;
+	int count = 1;
+	for (int i = 0; i < sizeof(_media)/sizeof(_media[0]); ++i)
+		if (_media[i].width && (_media[i].width != w || _media[i].height != h)) ++count;
+	return count;
 }
-static void FaceLiveMediaSize(int i, int& w, int& h)
+static void FaceLiveMediaSize(int channel, int i, int& w, int& h)
 {
-	if (FaceLiveGetPreferredSize(w, h)) return;
+	if (FaceLiveGetPreferredSize(channel, w, h))
+	{
+		if (channel == 0 || i == 0) return;
+		for (int n = 0; n < sizeof(_media)/sizeof(_media[0]); ++n)
+			if (_media[n].width && (_media[n].width != w || _media[n].height != h) && --i == 0)
+			{ w = _media[n].width; h = _media[n].height; return; }
+		return;
+	}
 	w = _media[i].width; h = _media[i].height;
+}
+
+// Validate the fields that determine pixel layout, rather than byte-comparing
+// VIDEOINFO padding, rectangles and advisory bit rates supplied by each client.
+static HRESULT FaceLiveCheckType(const AM_MEDIA_TYPE* mt)
+{
+	if (!mt || mt->majortype != MEDIATYPE_Video || mt->formattype != FORMAT_VideoInfo ||
+		mt->cbFormat < sizeof(VIDEOINFOHEADER) || !mt->pbFormat) return VFW_E_TYPE_NOT_ACCEPTED;
+	const VIDEOINFOHEADER* vi = (const VIDEOINFOHEADER*)mt->pbFormat;
+	const BITMAPINFOHEADER& b = vi->bmiHeader;
+	if (b.biSize != sizeof(BITMAPINFOHEADER) || b.biPlanes != 1 || b.biCompression != BI_RGB ||
+		b.biWidth < 16 || b.biHeight < 16 || b.biWidth > 3840 || b.biHeight > 3840 ||
+		(unsigned long long)b.biWidth * b.biHeight > 3840ull * 2160ull ||
+		(b.biBitCount != 24 && b.biBitCount != 32)) return VFW_E_TYPE_NOT_ACCEPTED;
+	if ((b.biBitCount == 24 && (mt->subtype != MEDIASUBTYPE_RGB24 || b.biWidth % 4)) ||
+		(b.biBitCount == 32 && mt->subtype != MEDIASUBTYPE_ARGB32 && mt->subtype != MEDIASUBTYPE_RGB32))
+		return VFW_E_TYPE_NOT_ACCEPTED;
+	const DWORD size = b.biWidth * b.biHeight * (b.biBitCount / 8);
+	if (b.biSizeImage && b.biSizeImage != size) return VFW_E_TYPE_NOT_ACCEPTED;
+	if (vi->AvgTimePerFrame < 10000000 / 120 || vi->AvgTimePerFrame > 10000000) return VFW_E_TYPE_NOT_ACCEPTED;
+	return S_OK;
 }
 
 //Error draw modes (what to display on screen in case of errors/warnings)
@@ -128,12 +164,16 @@ DECLARE_INTERFACE_(ICamSource, IUnknown) { };
 
 class CCaptureStream : CSourceStream, IKsPropertySet, IAMStreamConfig, IAMStreamControl, IAMPushSource
 {
+#ifdef FACELIVE_PIXEL_TEST
+	friend struct PixelTest;
+#endif
 public:
 	CCaptureStream(CSource* pOwner, HRESULT* phr, int CapNum) : CSourceStream("Stream", phr, pOwner, L"Output")
 	{
 		m_llFrame = m_llFrameMissCount = 0;
 		m_prevStartTime = 0;
 		m_avgTimePerFrame = 10000000 / 30;
+		m_formatExplicit = false;
 		m_pReceiver = new SharedImageMemory(CapNum);
 		m_iUnscaledBufSize = 0;
 		m_pUnscaledBuf = NULL;
@@ -370,12 +410,12 @@ private:
 			const double ay = (ah - (ResizeFromHeight / scale)) / 2.0;
 			const uint8_t *src = (const uint8_t*)BufIn, BlackPixel[3] = {0, 0, 0};
 			uint8_t *dst = (uint8_t*)BufOut + (RowStart * Width * 3);
-			for (size_t y = RowStart, yEnd = RowEnd, isMaxW = ResizeFromWidth, isOffsetMax = ResizeFromHeight * ResizeFromPitch; y != yEnd; y++)
+			for (size_t y = RowStart, yEnd = RowEnd; y != yEnd; y++)
 				for (size_t x = 0; x != w; x++, dst += 3)
 				{
-					const size_t isx = (size_t)((x-ax)*scale), isy = (size_t)((y-ay)*scale);
-					const size_t isOffset = (isx > isMaxW ? isOffsetMax : isy * ResizeFromPitch + isx * 3);
-					memcpy(dst, (isOffset >= isOffsetMax ? BlackPixel : src + isOffset), 3);
+					const double sx = (x-ax)*scale, sy = (y-ay)*scale;
+					const bool outside = sx < 0 || sy < 0 || sx >= ResizeFromWidth || sy >= ResizeFromHeight;
+					memcpy(dst, (outside ? BlackPixel : src + (size_t)sy * ResizeFromPitch + (size_t)sx * 3), 3);
 				}
 		}
 
@@ -388,12 +428,12 @@ private:
 			const double ay = (ah - (ResizeFromHeight / scale)) / 2.0;
 			const uint32_t *src = (const uint32_t*)BufIn;
 			uint32_t *dst = (uint32_t*)BufOut + (RowStart * Width);
-			for (size_t y = RowStart, yEnd = RowEnd, isMaxW = ResizeFromWidth, isOffsetMax = ResizeFromHeight * fromw; y != yEnd; y++)
+			for (size_t y = RowStart, yEnd = RowEnd; y != yEnd; y++)
 				for (size_t x = 0; x != w; x++, dst++)
 				{
-					const size_t isx = (size_t)((x-ax)*scale), isy = (size_t)((y-ay)*scale);
-					const size_t isOffset = (isx > isMaxW ? isOffsetMax : isy * fromw + isx);
-					*dst = (isOffset >= isOffsetMax ? 0 : src[isOffset]);
+					const double sx = (x-ax)*scale, sy = (y-ay)*scale;
+					const bool outside = sx < 0 || sy < 0 || sx >= ResizeFromWidth || sy >= ResizeFromHeight;
+					*dst = (outside ? 0 : src[(size_t)sy * fromw + (size_t)sx]);
 				}
 			UCASSERT(dst ==  (uint32_t*)BufOut + (RowEnd * Width));
 		}
@@ -777,7 +817,17 @@ private:
 		if (pmt == NULL) DebugLog("[SetFormat] E_POINTER\n");
 		if (pmt == NULL) return E_POINTER;
 
+		HRESULT valid = FaceLiveCheckType(pmt);
+		if (FAILED(valid)) return valid;
+		CAutoLock lock(m_pFilter->pStateLock());
 		VIDEOINFO* pvi = (VIDEOINFO*)pmt->pbFormat;
+		if (IsConnected())
+		{
+			const VIDEOINFOHEADER* current = (const VIDEOINFOHEADER*)m_mt.Format();
+			if (current->bmiHeader.biWidth == pvi->bmiHeader.biWidth && current->bmiHeader.biHeight == pvi->bmiHeader.biHeight &&
+				current->bmiHeader.biBitCount == pvi->bmiHeader.biBitCount && current->AvgTimePerFrame == pvi->AvgTimePerFrame) return S_OK;
+			return VFW_E_NOT_STOPPED; // Reopen before changing the connected allocator size.
+		}
 		if (pvi == NULL) DebugLog("[SetFormat] E_UNEXPECTED (pvi is null)\n");
 		if (pvi == NULL) return E_UNEXPECTED;
 
@@ -790,6 +840,9 @@ private:
 		m_avgTimePerFrame = pvi->AvgTimePerFrame;
 		m_mt = *pmt;
 		((VIDEOINFO*)m_mt.pbFormat)->bmiHeader.biSizeImage = DIBSIZE(((VIDEOINFO*)m_mt.pbFormat)->bmiHeader);
+		m_mt.SetSampleSize(((VIDEOINFO*)m_mt.pbFormat)->bmiHeader.biSizeImage);
+		m_formatExplicit = true;
+		IncrementTypeVersion();
 		return S_OK;
 	}
 
@@ -806,7 +859,7 @@ private:
 	{
 		if (piCount == NULL || piSize == NULL) DebugLog("[GetNumberOfCapabilities] E_POINTER\n");
 		if (piCount == NULL || piSize == NULL) return E_POINTER;
-		*piCount = FaceLiveMediaCount()*2; //RGB and RGBA variations
+		*piCount = FaceLiveMediaCount(m_pReceiver->GetCapNum())*2; //RGB and RGBA variations
 		*piSize = sizeof(VIDEO_STREAM_CONFIG_CAPS);
 		DebugLog("[GetNumberOfCapabilities] Returning Count: %d - Size: %d\n", *piCount, *piSize);
 		return S_OK;
@@ -816,10 +869,11 @@ private:
 	{
 		if (ppmt == NULL || pSCC == NULL) DebugLog("[GetStreamCaps] E_POINTER\n");
 		if (ppmt == NULL || pSCC == NULL) return E_POINTER;
+		*ppmt = NULL;
 
 		CMediaType mt;
-		HRESULT hr = GetMediaType(iIndex, &mt);
-		if (FAILED(hr)) return hr;
+		HRESULT hr = GetAvailableMediaType(iIndex, &mt);
+		if (hr != S_OK) return (hr == VFW_S_NO_MORE_ITEMS ? S_FALSE : hr);
 		VIDEOINFO *pvi = (VIDEOINFO*)mt.Format();
 
 		*ppmt = CreateMediaType(&mt);
@@ -831,7 +885,7 @@ private:
 		pCaps->VideoStandard      = 0;
 		pCaps->CropAlignX         = 1;
 		pCaps->CropAlignY         = 1;
-		pCaps->OutputGranularityX = 1;
+		pCaps->OutputGranularityX = (pvi->bmiHeader.biBitCount == 24 ? 4 : 1);
 		pCaps->OutputGranularityY = 1;
 		pCaps->StretchTapsX       = 2;
 		pCaps->StretchTapsY       = 2;
@@ -845,48 +899,73 @@ private:
 		pCaps->MaxCroppingSize.cy = pvi->bmiHeader.biHeight;
 		pCaps->CropGranularityX   = 1;
 		pCaps->CropGranularityY   = 1;
-		pCaps->MinOutputSize.cx   = 4;
-		pCaps->MinOutputSize.cy   = 4;
+		pCaps->MinOutputSize.cx   = 16;
+		pCaps->MinOutputSize.cy   = 16;
 		pCaps->MaxOutputSize.cx   = pvi->bmiHeader.biWidth;
 		pCaps->MaxOutputSize.cy   = pvi->bmiHeader.biHeight;
 		pCaps->MinFrameInterval = 10000000 / 120;
-		pCaps->MaxFrameInterval = 10000000 / 30;
-		pCaps->MinBitsPerSecond = pCaps->MinOutputSize.cx * pCaps->MinOutputSize.cy * pvi->bmiHeader.biBitCount * 30;
-		pCaps->MaxBitsPerSecond = pCaps->MaxOutputSize.cx * pCaps->MaxOutputSize.cy * pvi->bmiHeader.biBitCount * 120;
+		pCaps->MaxFrameInterval = 10000000;
+		pCaps->MinBitsPerSecond = pCaps->MinOutputSize.cx * pCaps->MinOutputSize.cy * pvi->bmiHeader.biBitCount;
+		const unsigned long long maxBits = (unsigned long long)pCaps->MaxOutputSize.cx * pCaps->MaxOutputSize.cy * pvi->bmiHeader.biBitCount * 120;
+		pCaps->MaxBitsPerSecond = (LONG)(maxBits > 0x7fffffffull ? 0x7fffffffull : maxBits);
 		DebugLog("[GetStreamCaps] Index: %d - MINWIDTH: %d - MINHEIGHT: %d - MAXWIDTH: %d - MAXHEIGHT: %d - BITS: %d - TPS: %d - SIZEIMAGE: %d - SIZECALC: %d\n", iIndex, (int)pCaps->MinOutputSize.cx, (int)pCaps->MinOutputSize.cy, (int)pCaps->MaxOutputSize.cx, (int)pCaps->MaxOutputSize.cy, (int)pvi->bmiHeader.biBitCount, (int)pvi->AvgTimePerFrame, (int)pvi->bmiHeader.biSizeImage, (int)DIBSIZE(pvi->bmiHeader));
 		return S_OK;
 	}
 
 	HRESULT SetMediaType(const CMediaType *pmt) override
 	{
+		HRESULT valid = CheckMediaType(pmt);
+		if (FAILED(valid)) return valid;
 		VIDEOINFOHEADER* pvi = (VIDEOINFOHEADER*)(pmt->Format());
 		DebugLog("[SetMediaType] [ASKD] WIDTH: %d - HEIGHT: %d - BITS: %d - TPS: %d - SIZEIMAGE: %d - SIZECALC: %d\n", (int)pvi->bmiHeader.biWidth, (int)pvi->bmiHeader.biHeight, (int)pvi->bmiHeader.biBitCount, (int)pvi->AvgTimePerFrame, (int)pvi->bmiHeader.biSizeImage, (int)DIBSIZE(pvi->bmiHeader));
 		DebugLog("[SetMediaType] [HAVE] WIDTH: %d - HEIGHT: %d - BITS: %d - TPS: %d - SIZEIMAGE: %d - SIZECALC: %d\n", (int)((VIDEOINFO*)m_mt.Format())->bmiHeader.biWidth, (int)((VIDEOINFO*)m_mt.Format())->bmiHeader.biHeight, (int)((VIDEOINFO*)m_mt.Format())->bmiHeader.biBitCount, (int)((VIDEOINFO*)m_mt.Format())->AvgTimePerFrame, (int)((VIDEOINFO*)m_mt.Format())->bmiHeader.biSizeImage, (int)DIBSIZE(((VIDEOINFO*)m_mt.Format())->bmiHeader));
 		HRESULT hr = CSourceStream::SetMediaType(pmt);
+		if (SUCCEEDED(hr))
+		{
+			m_mt = *pmt;
+			VIDEOINFOHEADER* selected = (VIDEOINFOHEADER*)m_mt.Format();
+			selected->bmiHeader.biSizeImage = DIBSIZE(selected->bmiHeader);
+			m_avgTimePerFrame = selected->AvgTimePerFrame;
+		}
 		return hr;
 	}
 
 	HRESULT CheckMediaType(const CMediaType *pMediaType) override
 	{
 		CAutoLock lock(m_pFilter->pStateLock());
-		VIDEOINFOHEADER *pvi = (VIDEOINFOHEADER *)(pMediaType->Format());
-		if (!pvi) DebugLog("[CheckMediaType] WANT VIDEO INFO NULL\n");
-		else DebugLog("[CheckMediaType] [WANT] WIDTH: %d - HEIGHT: %d - BITS: %d - TPS: %d - SIZEIMAGE: %d - SIZECALC: %d - CBFORMAT: %d\n", (int)pvi->bmiHeader.biWidth, (int)pvi->bmiHeader.biHeight, (int)pvi->bmiHeader.biBitCount, (int)pvi->AvgTimePerFrame, (int)pvi->bmiHeader.biSizeImage, (int)DIBSIZE(pvi->bmiHeader), (int)pMediaType->cbFormat);
-		     DebugLog("[CheckMediaType] [HAVE] WIDTH: %d - HEIGHT: %d - BITS: %d - TPS: %d - SIZEIMAGE: %d - SIZECALC: %d - CBFORMAT: %d\n", (int)((VIDEOINFO*)m_mt.Format())->bmiHeader.biWidth, (int)((VIDEOINFO*)m_mt.Format())->bmiHeader.biHeight, (int)((VIDEOINFO*)m_mt.Format())->bmiHeader.biBitCount, (int)((VIDEOINFO*)m_mt.Format())->AvgTimePerFrame, (int)((VIDEOINFO*)m_mt.Format())->bmiHeader.biSizeImage, (int)DIBSIZE(((VIDEOINFO*)m_mt.Format())->bmiHeader), (int)m_mt.cbFormat);
-		     DebugLog("[CheckMediaType] [RETURNING] %s\n", (*pMediaType != m_mt ? "E_INVALIDARG" : "S_OK"));
-		return (*pMediaType != m_mt ? E_INVALIDARG : S_OK);
+		HRESULT valid = FaceLiveCheckType(pMediaType);
+		if (FAILED(valid) || !m_formatExplicit) return valid;
+		const VIDEOINFOHEADER* requested = (const VIDEOINFOHEADER*)pMediaType->pbFormat;
+		const VIDEOINFOHEADER* selected = (const VIDEOINFOHEADER*)m_mt.pbFormat;
+		return (requested->bmiHeader.biWidth == selected->bmiHeader.biWidth &&
+			requested->bmiHeader.biHeight == selected->bmiHeader.biHeight &&
+			requested->bmiHeader.biBitCount == selected->bmiHeader.biBitCount &&
+			pMediaType->subtype == m_mt.subtype && requested->AvgTimePerFrame == selected->AvgTimePerFrame) ? S_OK : VFW_E_TYPE_NOT_ACCEPTED;
 	}
 
 	HRESULT GetMediaType(int iPos, CMediaType *pMediaType) override
 	{
 		CheckPointer(pMediaType, E_POINTER);
 		if (iPos < 0) return E_INVALIDARG;
-		const int MediaCount = FaceLiveMediaCount();
+		CAutoLock lock(m_pFilter->pStateLock());
+		if (m_formatExplicit)
+		{
+			if (iPos != 0) return VFW_S_NO_MORE_ITEMS;
+			return pMediaType->Set(m_mt);
+		}
+		return GetAvailableMediaType(iPos, pMediaType);
+	}
+
+	HRESULT GetAvailableMediaType(int iPos, CMediaType *pMediaType)
+	{
+		CheckPointer(pMediaType, E_POINTER);
+		if (iPos < 0) return E_INVALIDARG;
+		const int MediaCount = FaceLiveMediaCount(m_pReceiver->GetCapNum());
 		if (iPos >= MediaCount*2) return VFW_S_NO_MORE_ITEMS;
 		CAutoLock cAutoLock(m_pFilter->pStateLock()); 
 
 		int iMedia = iPos%MediaCount, MediaW, MediaH;
-		FaceLiveMediaSize(iMedia, MediaW, MediaH);
+		FaceLiveMediaSize(m_pReceiver->GetCapNum(), iMedia, MediaW, MediaH);
 		UCASSERT(MediaW * MediaH * 4 * sizeof(short) <= MAX_SHARED_IMAGE_SIZE);
 		VIDEOINFO *pvi = (VIDEOINFO *)pMediaType->AllocFormatBuffer(sizeof(VIDEOINFO));
 		ZeroMemory(pvi, sizeof(VIDEOINFO));
@@ -919,6 +998,7 @@ private:
 	}
 
 	CMediaType m_mt;
+	bool m_formatExplicit;
 	LONGLONG m_llFrame, m_llFrameMissCount, m_llFrameMissMax;
 	REFERENCE_TIME m_prevStartTime;
 	REFERENCE_TIME m_avgTimePerFrame;
@@ -1208,9 +1288,15 @@ static HRESULT RegisterFilters(BOOL bRegister)
 					StringFromCLSID(CLSID_VideoInputDeviceCategory, &CLSID_Category_Str);
 					StringFromCLSID(GetCLSIDUnityCaptureServiceNum(i), &CLSID_Filter_Str);
 					StringCchPrintfW(strKey, 256, L"SOFTWARE\\Classes\\CLSID\\%s\\Instance\\%s", CLSID_Category_Str, CLSID_Filter_Str);
-					RegOpenKeyExW(HKEY_LOCAL_MACHINE, strKey, 0, KEY_ALL_ACCESS, &hKey);
-					RegSetValueExA(hKey, "DevicePath", 0, REG_SZ, (LPBYTE)"foo:bar", (DWORD)sizeof("foo:bar"));
-					RegCloseKey(hKey);
+					if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, strKey, 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+					{
+						wchar_t devicePath[96];
+						StringCchPrintfW(devicePath, 96, L"facelive:camera:%s", CLSID_Filter_Str);
+						RegSetValueExW(hKey, L"DevicePath", 0, REG_SZ, (const BYTE*)devicePath, (DWORD)((wcslen(devicePath) + 1) * sizeof(wchar_t)));
+						RegCloseKey(hKey);
+					}
+					CoTaskMemFree(CLSID_Category_Str);
+					CoTaskMemFree(CLSID_Filter_Str);
 				}
 				if (FAILED(hr)) MessageBoxA(0, "Service RegisterFilter of IFilterMapper2 failed", "RegisterFilters setup", NULL);
 			}

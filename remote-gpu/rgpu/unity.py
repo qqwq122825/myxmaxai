@@ -56,7 +56,10 @@ class UnityCamera:
         if set_resolution:
             try:
                 import winreg
-                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\FaceLive\VirtualCam") as key:
+                path = r"Software\FaceLive\VirtualCam"
+                if channel:
+                    path += rf"\Channels\{channel}"
+                with winreg.CreateKey(winreg.HKEY_CURRENT_USER, path) as key:
                     winreg.SetValueEx(key, "Width", 0, winreg.REG_DWORD, width)
                     winreg.SetValueEx(key, "Height", 0, winreg.REG_DWORD, height)
             except Exception:

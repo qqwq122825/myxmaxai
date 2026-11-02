@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import platform
 import shutil
 import socket
 import subprocess
+import sys
 from dataclasses import asdict
 from fractions import Fraction
 from pathlib import Path
@@ -14,6 +16,26 @@ import numpy as np
 
 from . import __version__
 from .media import list_cameras
+
+
+def input_driver_update_required():
+    """An EXE overlay does not replace the registered DLL in ProgramData."""
+    if platform.system() != "Windows":
+        return False
+    import winreg
+    bundle = (Path(sys.executable).parent / "VirtualCam" if getattr(sys, "frozen", False)
+              else Path(__file__).resolve().parents[2] / "app" / "VirtualCam") / "UnityCaptureFilter64.dll"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r"CLSID\{5C2CD55C-92AD-4999-8666-912BD3E70012}\InprocServer32") as key:
+            installed = Path(winreg.QueryValueEx(key, None)[0])
+        if not bundle.is_file() or not installed.is_file():
+            return False  # Missing drivers are diagnosed by the reader, rather than called an update.
+        def digest(path):
+            with path.open("rb") as stream:
+                return hashlib.file_digest(stream, "sha256").digest()
+        return digest(bundle) != digest(installed)
+    except OSError:
+        return False
 
 
 def run_command(arguments):
@@ -72,6 +94,7 @@ def report(probe_nvenc=False):
             except OSError:
                 installed[name] = {"exists": False}
         data["virtual_camera_drivers"] = installed
+        data["input_driver_update_required"] = input_driver_update_required()
     return data
 
 

@@ -31,6 +31,7 @@ struct SharedImageMemory
 
 	~SharedImageMemory()
 	{
+		if (m_pSharedBuf) UnmapViewOfFile(m_pSharedBuf);
 		if (m_hMutex) CloseHandle(m_hMutex);
 		if (m_hWantFrameEvent) CloseHandle(m_hWantFrameEvent);
 		if (m_hSentFrameEvent) CloseHandle(m_hSentFrameEvent);
