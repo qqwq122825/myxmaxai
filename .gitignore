@@ -7,3 +7,9 @@ packages/*.nupkg
 app/VirtualCam/*.dll
 *.user
 .vs/
+
+xcuserdata/
+*.xcuserstate
+build/
+.DS_Store
+*.bak
