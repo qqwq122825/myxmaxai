@@ -6,6 +6,19 @@
 	<string>AI魔颜</string>
 	<key>NSCameraUsageDescription</key>
 	<string>需要使用相机，把画面发送到你的处理服务器进行实时换脸。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>局域网模式需要访问本地网络，把摄像头画面发送到同一 Wi‑Fi 下的电脑接收端。</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.mtx.AIMoYan.connect</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>aimoyan</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<!-- 服务器使用自签名证书，App 内已按 Key 中的证书指纹做了严格校验（证书锁定）。 -->

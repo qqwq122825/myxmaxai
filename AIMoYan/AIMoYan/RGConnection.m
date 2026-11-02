@@ -8,13 +8,19 @@
 #import <QuartzCore/QuartzCore.h>
 #import <Security/Security.h>
 
-static NSString *const RGErrorDomain = @"AIMoYan.Connection";
+NSErrorDomain const RGConnectionErrorDomain = @"AIMoYan.Connection";
 static const NSInteger RGDefaultPort = 8766;
 static const NSInteger RGMaxInFlight = 3;          // queued video messages before we start dropping camera frames
 static const NSInteger RGMaxMessage = 4 * 1024 * 1024;
 
 static NSError *RGError(NSString *message) {
-    return [NSError errorWithDomain:RGErrorDomain code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
+    return [NSError errorWithDomain:RGConnectionErrorDomain code:RGConnectionErrorGeneral
+                           userInfo:@{NSLocalizedDescriptionKey: message}];
+}
+
+static NSError *RGUnreachable(NSString *message) {
+    return [NSError errorWithDomain:RGConnectionErrorDomain code:RGConnectionErrorUnreachable
+                           userInfo:@{NSLocalizedDescriptionKey: message}];
 }
 
 #pragma mark - RGServerInfo
@@ -132,7 +138,7 @@ static NSError *RGError(NSString *message) {
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"%@://%@%@", scheme, self.server.authority, path]];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     [request setValue:[@"Bearer " stringByAppendingString:self.server.secret] forHTTPHeaderField:@"Authorization"];
-    request.timeoutInterval = 15;
+    request.timeoutInterval = self.localNetwork ? 5 : 15;   // same Wi‑Fi answers in milliseconds
     return request;
 }
 
@@ -151,17 +157,25 @@ static NSError *RGError(NSString *message) {
         if (!self || self.closed) return;
         if (error) { [self failWith:[self describeTransportError:error]]; return; }
         NSInteger status = [(NSHTTPURLResponse *)response statusCode];
-        if (status == 401) { [self failWith:RGError(@"Key 不正确，请在服务器上重新复制 Key。")]; return; }
+        if (status == 401) {
+            [self failWith:RGError(self.localNetwork ? @"Key 不正确，请在电脑上重新显示二维码再扫一次。"
+                                                     : @"Key 不正确，请在服务器上重新复制 Key。")]; return;
+        }
         if (status != 200) { [self failWith:RGError([NSString stringWithFormat:@"服务器拒绝连接（HTTP %ld）。", (long)status])]; return; }
         NSDictionary *json = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         if (![json isKindOfClass:NSDictionary.class] || ![json[@"protocol"] isEqual:@"direct-1"]) {
-            [self failWith:RGError(@"服务器版本不兼容，请更新服务器程序。")]; return;
+            [self failWith:RGError(@"对方程序版本不兼容，请更新服务器 / 电脑接收端。")]; return;
         }
         NSArray *features = [json[@"features"] isKindOfClass:NSArray.class] ? json[@"features"] : @[];
-        if (![features containsObject:@"relay-roles"]) {
-            [self failWith:RGError(@"服务器版本过旧，不支持手机推流。请先更新服务器程序。")]; return;
+        // "relay-roles": remote server that accepts a push-only phone; "lan-receiver": PC receiver on the same Wi‑Fi.
+        if (![features containsObject:@"relay-roles"] && ![features containsObject:@"lan-receiver"]) {
+            [self failWith:RGError(self.localNetwork ? @"接收端版本过旧，请更新电脑上的接收程序。"
+                                                     : @"服务器版本过旧，不支持手机推流。请先更新服务器程序。")]; return;
         }
-        if ([json[@"busy"] boolValue]) { [self failWith:RGError(@"服务器已有其他推流设备连接，请先停止旧连接。")]; return; }
+        if ([json[@"busy"] boolValue]) {
+            [self failWith:RGError(self.localNetwork ? @"电脑接收端已经连着另一台手机，请先在那台手机上断开。"
+                                                     : @"服务器已有其他推流设备连接，请先停止旧连接。")]; return;
+        }
         [self openStream];
     }];
     [health resume];
@@ -309,13 +323,31 @@ static NSError *RGError(NSString *message) {
 }
 
 - (NSError *)describeTransportError:(NSError *)error {
-    if (self.pinMismatch) return RGError(@"服务器身份与 Key 不一致。请在服务器上重新复制 Key，或检查地址是否填错。");
+    if (self.pinMismatch) return RGError(self.localNetwork ? @"接收端身份与 Key 不一致。请在电脑上重新显示二维码再扫一次。"
+                                                           : @"服务器身份与 Key 不一致。请在服务器上重新复制 Key，或检查地址是否填错。");
     if ([error.domain isEqual:NSURLErrorDomain]) {
+        if (self.localNetwork) {
+            switch (error.code) {
+                case NSURLErrorCannotConnectToHost:
+                case NSURLErrorCannotFindHost:
+                case NSURLErrorTimedOut:
+                    return RGUnreachable(@"连不上电脑。请确认：① 电脑上的接收端已打开；② 手机和电脑连的是同一个 Wi‑Fi（路由器）；"
+                                         @"③ 电脑防火墙放行了接收端；④ 二维码是最新的（电脑换过网络要重新扫）。");
+                case NSURLErrorNotConnectedToInternet:
+                    // Also what iOS reports when the "本地网络" permission is off.
+                    return RGUnreachable(@"手机无法访问局域网。请到 设置 → AI魔颜 打开「本地网络」，并确认手机已连接 Wi‑Fi。");
+                case NSURLErrorNetworkConnectionLost:
+                    return RGError(@"Wi‑Fi 连接断开了，请检查信号后重试。");
+                case NSURLErrorBadServerResponse:
+                    return RGError(@"电脑接收端拒绝了连接（可能 Key 不对，或已有其他手机连接）。");
+                default: break;
+            }
+        }
         switch (error.code) {
             case NSURLErrorCannotConnectToHost:
             case NSURLErrorCannotFindHost:
             case NSURLErrorTimedOut:
-                return RGError(@"连不上服务器。请检查地址和端口、服务器是否已点“启动接收”、安全组和防火墙是否放行该端口。");
+                return RGUnreachable(@"连不上服务器。请检查地址和端口、服务器是否已点“启动接收”、安全组和防火墙是否放行该端口。");
             case NSURLErrorNotConnectedToInternet:
             case NSURLErrorNetworkConnectionLost:
                 return RGError(@"网络断开了，请检查手机网络后重试。");

@@ -71,6 +71,12 @@
     dispatch_async(self.sessionQueue, ^{ if (self.session.isRunning) [self.session stopRunning]; });
 }
 
+- (void)resume {
+    dispatch_async(self.sessionQueue, ^{
+        if (self.input && !self.session.isRunning) [self.session startRunning];
+    });
+}
+
 - (void)switchCamera {
     dispatch_async(self.sessionQueue, ^{
         AVCaptureDevicePosition next = self.position == AVCaptureDevicePositionBack ? AVCaptureDevicePositionFront

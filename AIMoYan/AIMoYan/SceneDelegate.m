@@ -6,6 +6,7 @@
 //
 
 #import "SceneDelegate.h"
+#import "ViewController.h"
 
 @interface SceneDelegate ()
 
@@ -18,6 +19,20 @@
     // Use this method to optionally configure and attach the UIWindow `window` to the provided UIWindowScene `scene`.
     // If using a storyboard, the `window` property will automatically be initialized and attached to the scene.
     // This delegate does not imply the connecting scene or session are new (see `application:configurationForConnectingSceneSession` instead).
+    [self openPairingURLs:connectionOptions.URLContexts];   // cold start from an aimoyan:// link
+}
+
+- (void)scene:(UIScene *)scene openURLContexts:(NSSet<UIOpenURLContext *> *)URLContexts {
+    [self openPairingURLs:URLContexts];
+}
+
+- (void)openPairingURLs:(NSSet<UIOpenURLContext *> *)contexts {
+    for (UIOpenURLContext *context in contexts) {
+        if (![context.URL.scheme.lowercaseString isEqualToString:@"aimoyan"]) continue;
+        UIViewController *root = self.window.rootViewController;
+        if ([root isKindOfClass:ViewController.class]) [(ViewController *)root handlePairingURL:context.URL];
+        break;
+    }
 }
 
 

@@ -32,6 +32,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 @class RGConnection;
 
+extern NSErrorDomain const RGConnectionErrorDomain;
+typedef NS_ENUM(NSInteger, RGConnectionErrorCode) {
+    RGConnectionErrorGeneral = 1,
+    RGConnectionErrorUnreachable = 2,     // could not reach the address at all (try the next one)
+};
+
 @protocol RGConnectionDelegate <NSObject>
 /// Connected and the server accepted the video settings. Start sending frames.
 - (void)connectionDidBecomeReady:(RGConnection *)connection;
@@ -46,6 +52,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface RGConnection : NSObject
 @property (nonatomic, weak, nullable) id<RGConnectionDelegate> delegate;   // called on the main queue
 @property (nonatomic, readonly) BOOL ready;
+/// LAN mode (PC receiver on the same Wi‑Fi): shorter connect timeout and LAN-specific error messages.
+@property (nonatomic) BOOL localNetwork;
 @property (nonatomic, readonly) BOOL returnActive;
 /// Round-trip time in ms, or -1 when not measured yet.
 @property (atomic, readonly) double rttMs;

@@ -29,6 +29,8 @@ typedef NS_ENUM(NSInteger, RGQuality) {
 - (void)startWithPosition:(AVCaptureDevicePosition)position quality:(RGQuality)quality portrait:(BOOL)portrait
                completion:(void (^)(NSError *_Nullable error))completion;
 - (void)stop;
+/// Restarts the session after -stop (e.g. after the QR scanner closed), keeping camera / quality.
+- (void)resume;
 - (void)switchCamera;
 - (void)setQuality:(RGQuality)quality portrait:(BOOL)portrait;
 /// devicePoint: (0,0)…(1,1) from AVCaptureVideoPreviewLayer -captureDevicePointOfInterestForPoint:

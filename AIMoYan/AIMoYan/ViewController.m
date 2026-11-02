@@ -2,10 +2,10 @@
 //  ViewController.m
 //  AIMoYan
 //
-//  One screen: camera preview, server address + Key, connect.
-//  Tap = focus, double-tap = switch camera, pinch = zoom. When the server returns the
-//  processed picture it fills the screen and the camera moves to the small window
-//  (tap the small window to swap).
+//  One screen: camera preview, address + Key, connect. Two link modes:
+//    远程服务器 — push to the rented GPU server over the internet;
+//    局域网     — push to the PC receiver on the same Wi‑Fi (scan the QR code it shows).
+//  Tap = focus (then drag up/down = brightness), long-press = AE/AF lock, double-tap = switch camera.
 //
 
 #import "ViewController.h"
@@ -14,7 +14,10 @@
 #import "RGCamera.h"
 #import "RGConnection.h"
 #import "RGEncoder.h"
+#import "RGPairing.h"
 #import "RGReturnView.h"
+#import "RGScanViewController.h"
+#import <Network/Network.h>
 
 #pragma mark - Palette (same as the AI魔颜 desktop app)
 
@@ -36,12 +39,16 @@ static UIColor *RGColor(uint32_t hex, CGFloat alpha) {
 
 static NSString *const kKeychainService = @"AIMoYan.server";
 static NSString *const kAddressDefaultsKey = @"AIMoYan.serverAddress";
+static NSString *const kLANAddressDefaultsKey = @"AIMoYan.lanAddress";
+static NSString *const kModeDefaultsKey = @"AIMoYan.linkMode";
 static NSString *const kQualityDefaultsKey = @"AIMoYan.quality";
 static NSString *const kPortraitDefaultsKey = @"AIMoYan.portrait";
 
-static void RGKeychainSave(NSString *value) {
+static NSString *RGKeychainAccount(RGLinkMode mode) { return mode == RGLinkModeLAN ? @"lan-key" : @"key"; }
+
+static void RGKeychainSave(RGLinkMode mode, NSString *value) {
     NSDictionary *query = @{(id)kSecClass: (id)kSecClassGenericPassword, (id)kSecAttrService: kKeychainService,
-                            (id)kSecAttrAccount: @"key"};
+                            (id)kSecAttrAccount: RGKeychainAccount(mode)};
     SecItemDelete((__bridge CFDictionaryRef)query);
     if (value.length == 0) return;
     NSMutableDictionary *item = [query mutableCopy];
@@ -50,9 +57,10 @@ static void RGKeychainSave(NSString *value) {
     SecItemAdd((__bridge CFDictionaryRef)item, NULL);
 }
 
-static NSString *RGKeychainLoad(void) {
+static NSString *RGKeychainLoad(RGLinkMode mode) {
     NSDictionary *query = @{(id)kSecClass: (id)kSecClassGenericPassword, (id)kSecAttrService: kKeychainService,
-                            (id)kSecAttrAccount: @"key", (id)kSecReturnData: @YES, (id)kSecMatchLimit: (id)kSecMatchLimitOne};
+                            (id)kSecAttrAccount: RGKeychainAccount(mode), (id)kSecReturnData: @YES,
+                            (id)kSecMatchLimit: (id)kSecMatchLimitOne};
     CFTypeRef result = NULL;
     if (SecItemCopyMatching((__bridge CFDictionaryRef)query, &result) != errSecSuccess || !result) return @"";
     NSData *data = CFBridgingRelease(result);
@@ -96,12 +104,21 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
 @property (nonatomic, strong) UIButton *orientationButton;
 @property (nonatomic, strong) UIView *panel;
 @property (nonatomic, strong) UIStackView *formStack;
+@property (nonatomic, strong) UISegmentedControl *modeControl;
+@property (nonatomic, strong) UILabel *addressCaption;
+@property (nonatomic, strong) UILabel *keyCaption;
+@property (nonatomic, strong) UIButton *scanButton;
 @property (nonatomic, strong) UITextField *addressField;
 @property (nonatomic, strong) UITextField *keyField;
 @property (nonatomic, strong) UIButton *connectButton;
 @property (nonatomic, strong) UILabel *hintLabel;
 // State
 @property (nonatomic) RGState state;
+@property (nonatomic) RGLinkMode linkMode;
+@property (nonatomic, strong) NSMutableArray<RGServerInfo *> *pendingServers;   // other addresses still to try
+@property (nonatomic, strong, nullable) nw_path_monitor_t pathMonitor;
+@property (atomic) BOOL onWiFi;
+@property (nonatomic, strong, nullable) RGPairing *pendingPairing;              // opened via link before the view loaded
 @property (nonatomic) RGQuality quality;
 @property (nonatomic) BOOL portrait;
 @property (nonatomic) BOOL returnActive;
@@ -123,13 +140,16 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     self.quality = [defaults integerForKey:kQualityDefaultsKey] == RGQuality1080p ? RGQuality1080p : RGQuality720p;
     self.portrait = [defaults objectForKey:kPortraitDefaultsKey] ? [defaults boolForKey:kPortraitDefaultsKey] : YES;
+    self.linkMode = [defaults integerForKey:kModeDefaultsKey] == RGLinkModeLAN ? RGLinkModeLAN : RGLinkModeRemote;
+    self.pendingServers = [NSMutableArray array];
+    self.onWiFi = YES;
 
     [self buildViews];
     [self buildGestures];
-    self.addressField.text = [defaults stringForKey:kAddressDefaultsKey];
-    self.keyField.text = RGKeychainLoad();
+    [self loadFieldsForMode];
     [self applyState:RGStateIdle];
     [self refreshOptionButtons];
+    [self startWiFiMonitor];
 
     self.camera = [RGCamera new];
     self.previewView.previewLayer.session = self.camera.session;
@@ -140,10 +160,129 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(appDidEnterBackground)
                                                name:UIApplicationDidEnterBackgroundNotification object:nil];
+
+    if (self.pendingPairing) {
+        RGPairing *pairing = self.pendingPairing;
+        self.pendingPairing = nil;
+        dispatch_async(dispatch_get_main_queue(), ^{ [self applyPairing:pairing]; });
+    }
 }
 
 - (void)dealloc {
     [NSNotificationCenter.defaultCenter removeObserver:self];
+    if (_pathMonitor) nw_path_monitor_cancel(_pathMonitor);
+}
+
+#pragma mark Link mode (远程服务器 / 局域网)
+
+- (NSString *)addressDefaultsKeyForMode:(RGLinkMode)mode {
+    return mode == RGLinkModeLAN ? kLANAddressDefaultsKey : kAddressDefaultsKey;
+}
+
+- (void)loadFieldsForMode {
+    self.modeControl.selectedSegmentIndex = self.linkMode;
+    self.addressField.text = [NSUserDefaults.standardUserDefaults stringForKey:[self addressDefaultsKeyForMode:self.linkMode]];
+    self.keyField.text = RGKeychainLoad(self.linkMode);
+    BOOL lan = self.linkMode == RGLinkModeLAN;
+    self.addressCaption.text = lan ? @"电脑地址（扫码自动填写）" : @"服务器地址";
+    self.keyCaption.text = lan ? @"连接 Key（扫码自动填写）" : @"连接 Key";
+    self.addressField.attributedPlaceholder = [[NSAttributedString alloc]
+        initWithString:lan ? @"例如 192.168.1.23:8766" : @"服务器地址，例如 1.2.3.4:8766"
+            attributes:@{NSForegroundColorAttributeName: RG_MUTED}];
+    self.hintLabel.text = lan ? @"手机和电脑连同一个 Wi‑Fi · 电脑打开接收端，点地址栏右边的扫码按钮"
+                              : @"轻点对焦后上下滑调亮度 · 长按锁定对焦和亮度 · 双击切换前后摄像头";
+    [self refreshOptionButtons];
+}
+
+- (void)saveFieldsForMode {
+    [NSUserDefaults.standardUserDefaults setObject:self.addressField.text ?: @"" forKey:[self addressDefaultsKeyForMode:self.linkMode]];
+    RGKeychainSave(self.linkMode, self.keyField.text ?: @"");
+}
+
+- (void)setLinkModeOption:(RGLinkMode)mode {
+    if (mode == self.linkMode) return;
+    [self saveFieldsForMode];
+    self.linkMode = mode;
+    [NSUserDefaults.standardUserDefaults setInteger:mode forKey:kModeDefaultsKey];
+    [self loadFieldsForMode];
+    [self setStatus:mode == RGLinkModeLAN ? @"局域网模式 · 未连接" : @"AI魔颜 · 未连接" color:RG_MUTED];
+}
+
+- (void)modeChanged:(UISegmentedControl *)control {
+    [self.view endEditing:YES];
+    [self setLinkModeOption:control.selectedSegmentIndex == 1 ? RGLinkModeLAN : RGLinkModeRemote];
+}
+
+/// Tracks whether the phone is on Wi‑Fi (LAN mode needs it).
+- (void)startWiFiMonitor {
+    nw_path_monitor_t monitor = nw_path_monitor_create();
+    nw_path_monitor_set_queue(monitor, dispatch_get_main_queue());
+    __weak typeof(self) weakSelf = self;
+    nw_path_monitor_set_update_handler(monitor, ^(nw_path_t path) {
+        weakSelf.onWiFi = nw_path_uses_interface_type(path, nw_interface_type_wifi) ||
+                          nw_path_uses_interface_type(path, nw_interface_type_wired);
+    });
+    nw_path_monitor_start(monitor);
+    self.pathMonitor = monitor;
+}
+
+#pragma mark QR code
+
+- (void)scanTapped {
+    [self.view endEditing:YES];
+    if (self.state != RGStateIdle) { [self showToast:@"请先断开再扫码"]; return; }
+    if ([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo] == AVAuthorizationStatusNotDetermined) {
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeVideo completionHandler:^(BOOL granted) {
+            dispatch_async(dispatch_get_main_queue(), ^{ [self scanTapped]; });
+        }];
+        return;
+    }
+    [self.camera stop];                        // one capture session at a time
+    RGScanViewController *scanner = [RGScanViewController new];
+    scanner.modalPresentationStyle = UIModalPresentationFullScreen;
+    __weak typeof(self) weakSelf = self;
+    scanner.completion = ^(NSString *text) {
+        if (weakSelf.camera.session.inputs.count) [weakSelf.camera resume];
+        else [weakSelf startCamera];              // camera permission was granted only now
+        if (text) [weakSelf handleScannedText:text];
+    };
+    [self presentViewController:scanner animated:YES completion:nil];
+}
+
+- (void)handleScannedText:(NSString *)text {
+    NSError *error = nil;
+    RGPairing *pairing = [RGPairing pairingFromString:text error:&error];
+    if (!pairing) { [self showAlert:@"无法识别" message:error.localizedDescription]; return; }
+    [self applyPairing:pairing];
+}
+
+/// Opened from an aimoyan:// link (e.g. scanned with the system Camera app).
+- (void)handlePairingURL:(NSURL *)url {
+    NSError *error = nil;
+    RGPairing *pairing = [RGPairing pairingFromString:url.absoluteString error:&error];
+    if (!pairing) {
+        if (self.isViewLoaded) [self showAlert:@"无法识别" message:error.localizedDescription];
+        return;
+    }
+    if (!self.isViewLoaded) { self.pendingPairing = pairing; return; }
+    [self applyPairing:pairing];
+}
+
+- (void)applyPairing:(RGPairing *)pairing {
+    if (self.state != RGStateIdle) { [self showToast:@"请先断开再更换连接"]; return; }
+    if (!pairing.hasMode) {                       // only a Key
+        self.keyField.text = pairing.key;
+        RGKeychainSave(self.linkMode, pairing.key);
+        [self showToast:@"已填入 Key"];
+        return;
+    }
+    [self setLinkModeOption:pairing.mode];
+    self.addressField.text = pairing.addressText;
+    self.keyField.text = pairing.key;
+    [self saveFieldsForMode];
+    NSString *who = pairing.name.length ? pairing.name : (pairing.mode == RGLinkModeLAN ? @"电脑" : @"服务器");
+    [self showToast:[NSString stringWithFormat:@"已识别：%@", who]];
+    [self connectTapped];                         // scanning means "connect to this"
 }
 
 #pragma mark Camera
@@ -187,28 +326,59 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     [self.view endEditing:YES];
     if (self.state != RGStateIdle) { [self disconnectWithMessage:@"已断开"]; return; }
 
-    NSError *error = nil;
-    RGServerInfo *server = [RGServerInfo infoWithAddress:self.addressField.text ?: @"" key:self.keyField.text ?: @"" error:&error];
-    if (!server) { [self showError:error.localizedDescription]; return; }
-    [NSUserDefaults.standardUserDefaults setObject:self.addressField.text forKey:kAddressDefaultsKey];
-    RGKeychainSave(self.keyField.text);
+    BOOL lan = self.linkMode == RGLinkModeLAN;
+    NSArray<NSString *> *addresses = RGSplitAddresses(self.addressField.text ?: @"");
+    if (addresses.count == 0) {
+        [self showError:lan ? @"请先扫描电脑接收端显示的二维码，或手动填写电脑地址。" : @"请填写服务器地址，例如 1.2.3.4:8766。"];
+        return;
+    }
+    NSMutableArray<RGServerInfo *> *servers = [NSMutableArray array];
+    for (NSString *address in addresses) {
+        NSError *error = nil;
+        RGServerInfo *server = [RGServerInfo infoWithAddress:address key:self.keyField.text ?: @"" error:&error];
+        if (!server) { [self showError:error.localizedDescription]; return; }
+        [servers addObject:server];
+    }
+    if (lan && !self.onWiFi) {
+        [self showError:@"手机现在没有连接 Wi‑Fi。局域网模式需要手机和电脑连同一个 Wi‑Fi（路由器）。"];
+        return;
+    }
+    [self saveFieldsForMode];
+    [self.pendingServers setArray:servers];
+    [self applyState:RGStateConnecting];
+    [self connectToNextServer];
+}
+
+- (int)bitrateKbps {
+    // Wi‑Fi has bandwidth to spare: higher bitrate = cleaner picture for the face swap.
+    if (self.linkMode == RGLinkModeLAN) return self.quality == RGQuality1080p ? 12000 : 6000;
+    return self.quality == RGQuality1080p ? 8000 : 4000;
+}
+
+/// Tries the addresses in order (a PC can have several network cards); the first one that answers wins.
+- (void)connectToNextServer {
+    RGServerInfo *server = self.pendingServers.firstObject;
+    if (!server) return;
+    [self.pendingServers removeObjectAtIndex:0];
 
     CGSize size = [RGCamera frameSizeForQuality:self.quality portrait:self.portrait];
     RGVideoSettings *settings = [RGVideoSettings new];
     settings.width = (int)size.width;
     settings.height = (int)size.height;
     settings.fps = 30;
-    settings.bitrateKbps = self.quality == RGQuality1080p ? 8000 : 4000;
+    settings.bitrateKbps = [self bitrateKbps];
 
     RGConnection *connection = [[RGConnection alloc] initWithServer:server settings:settings];
+    connection.localNetwork = self.linkMode == RGLinkModeLAN;
     connection.delegate = self;
     self.connection = connection;
-    [self applyState:RGStateConnecting];
-    [self setStatus:[NSString stringWithFormat:@"正在连接 %@:%ld …", server.host, (long)server.port] color:RG_RING];
+    NSString *target = self.linkMode == RGLinkModeLAN ? @"电脑" : @"";
+    [self setStatus:[NSString stringWithFormat:@"正在连接%@ %@:%ld …", target, server.host, (long)server.port] color:RG_RING];
     [connection connect];
 }
 
 - (void)disconnectWithMessage:(NSString *)message {
+    [self.pendingServers removeAllObjects];
     RGConnection *connection = self.connection;
     self.connection = nil;
     connection.delegate = nil;
@@ -233,14 +403,16 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     if (connection != self.connection) return;
     CGSize size = [RGCamera frameSizeForQuality:self.quality portrait:self.portrait];
     RGEncoder *encoder = [[RGEncoder alloc] initWithWidth:(int)size.width height:(int)size.height
-                                                      fps:30 bitrateKbps:self.quality == RGQuality1080p ? 8000 : 4000];
+                                                      fps:30 bitrateKbps:[self bitrateKbps]];
     if (!encoder) { [self disconnectWithMessage:@"这台手机无法启动 H.264 编码"]; return; }
     __weak RGConnection *weakConnection = connection;
     encoder.onMessage = ^(NSData *message) { [weakConnection sendVideoMessage:message]; };
     self.encoder = encoder;
     self.lastSent = self.lastSentBytes = self.lastReceived = 0;
     [self applyState:RGStateLive];
-    [self setStatus:@"推流中 · 换脸结果在电脑端接收" color:RG_OK];
+    [self.pendingServers removeAllObjects];
+    [self setStatus:self.linkMode == RGLinkModeLAN ? @"局域网推流中 · 电脑接收端已连接" : @"推流中 · 换脸结果在电脑端接收"
+              color:RG_OK];
 }
 
 - (void)connection:(RGConnection *)connection returnActiveChanged:(BOOL)active {
@@ -261,6 +433,13 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
 
 - (void)connection:(RGConnection *)connection didCloseWithError:(NSError *)error {
     if (connection != self.connection) return;
+    // Address did not answer: try the next one from the QR code before giving up.
+    if (error.code == RGConnectionErrorUnreachable && [error.domain isEqual:RGConnectionErrorDomain] &&
+        self.pendingServers.count > 0 && self.state == RGStateConnecting) {
+        connection.delegate = nil;
+        [self connectToNextServer];
+        return;
+    }
     [self disconnectWithMessage:error ? @"连接已断开" : @"已断开"];
     if (error) [self showError:error.localizedDescription];
 }
@@ -286,6 +465,7 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     _state = state;
     BOOL idle = state == RGStateIdle;
     self.addressField.enabled = self.keyField.enabled = idle;
+    self.modeControl.enabled = self.scanButton.enabled = idle;
     self.qualityButton.enabled = self.orientationButton.enabled = idle;
     self.qualityButton.alpha = self.orientationButton.alpha = idle ? 1 : 0.4;
 
@@ -304,6 +484,8 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
         self.formStack.hidden = !idle;
         self.formStack.alpha = idle ? 1 : 0;
         self.hintLabel.hidden = !idle;
+        self.modeControl.hidden = !idle;
+        self.modeControl.alpha = idle ? 1 : 0;
     }];
     UIApplication.sharedApplication.idleTimerDisabled = !idle;   // keep the screen on while streaming
 
@@ -323,7 +505,11 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
 }
 
 - (void)showError:(NSString *)message {
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"连接失败" message:message
+    [self showAlert:@"连接失败" message:message];
+}
+
+- (void)showAlert:(NSString *)title message:(NSString *)message {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     if (!self.presentedViewController) [self presentViewController:alert animated:YES completion:nil];
@@ -371,7 +557,7 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
 
 - (void)refreshOptionButtons {
     __weak typeof(self) weakSelf = self;
-    NSArray *qualities = @[@[@"720p", @(RGQuality720p)], @[@"1080p（服务器需支持）", @(RGQuality1080p)]];
+    NSArray *qualities = @[@[@"720p", @(RGQuality720p)], @[self.linkMode == RGLinkModeLAN ? @"1080p（局域网推荐）" : @"1080p（服务器需支持）", @(RGQuality1080p)]];
     NSMutableArray *qualityActions = [NSMutableArray array];
     for (NSArray *q in qualities) {
         RGQuality value = [q[1] integerValue];
@@ -714,12 +900,35 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     UIStackView *keyRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.keyField, paste]];
     keyRow.spacing = 8;
 
+    UIButtonConfiguration *scanConfig = [UIButtonConfiguration tintedButtonConfiguration];
+    scanConfig.image = [UIImage systemImageNamed:@"qrcode.viewfinder"
+        withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold]];
+    scanConfig.baseForegroundColor = RG_RING;
+    scanConfig.baseBackgroundColor = RG_RING;
+    self.scanButton = [UIButton buttonWithConfiguration:scanConfig primaryAction:nil];
+    [self.scanButton addTarget:self action:@selector(scanTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.scanButton.accessibilityLabel = @"扫码连接";
+    [self.scanButton.widthAnchor constraintEqualToConstant:64].active = YES;
+    UIStackView *addressRow = [[UIStackView alloc] initWithArrangedSubviews:@[self.addressField, self.scanButton]];
+    addressRow.spacing = 8;
+
+    self.modeControl = [[UISegmentedControl alloc] initWithItems:@[@"远程服务器", @"局域网 Wi‑Fi"]];
+    self.modeControl.selectedSegmentTintColor = RG_LIVE;
+    [self.modeControl setTitleTextAttributes:@{NSForegroundColorAttributeName: RG_MUTED,
+        NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold]} forState:UIControlStateNormal];
+    [self.modeControl setTitleTextAttributes:@{NSForegroundColorAttributeName: UIColor.whiteColor,
+        NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold]} forState:UIControlStateSelected];
+    [self.modeControl addTarget:self action:@selector(modeChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.modeControl.heightAnchor constraintEqualToConstant:36].active = YES;
+
+    self.addressCaption = [self captionWithText:@"服务器地址"];
+    self.keyCaption = [self captionWithText:@"连接 Key"];
     self.formStack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        [self captionWithText:@"服务器地址"], self.addressField,
-        [self captionWithText:@"连接 Key"], keyRow]];
+        self.addressCaption, addressRow,
+        self.keyCaption, keyRow]];
     self.formStack.axis = UILayoutConstraintAxisVertical;
     self.formStack.spacing = 6;
-    [self.formStack setCustomSpacing:14 afterView:self.addressField];
+    [self.formStack setCustomSpacing:14 afterView:addressRow];
 
     UIButtonConfiguration *connectConfig = [UIButtonConfiguration filledButtonConfiguration];
     connectConfig.title = @"连接";
@@ -737,9 +946,10 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
 
     self.hintLabel = [self captionWithText:@"轻点对焦后上下滑调亮度 · 长按锁定对焦和亮度 · 双击切换前后摄像头"];
     self.hintLabel.textAlignment = NSTextAlignmentCenter;
+    self.hintLabel.numberOfLines = 0;
     self.hintLabel.font = [UIFont systemFontOfSize:11];
 
-    UIStackView *panelStack = [[UIStackView alloc] initWithArrangedSubviews:@[self.formStack, self.connectButton, self.hintLabel]];
+    UIStackView *panelStack = [[UIStackView alloc] initWithArrangedSubviews:@[self.modeControl, self.formStack, self.connectButton, self.hintLabel]];
     panelStack.axis = UILayoutConstraintAxisVertical;
     panelStack.spacing = 14;
     panelStack.translatesAutoresizingMaskIntoConstraints = NO;
