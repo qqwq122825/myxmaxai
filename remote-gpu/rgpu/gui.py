@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import contextlib
 from concurrent.futures import CancelledError
 import queue
+import math
 import threading
 import time
 import tkinter as tk
@@ -26,6 +28,7 @@ from .runtime import (VirtualOutput, load_preferences, pairing_from_fields,
 from .window_capture import list_windows
 
 BG, WHITE, INK, MUTED, BLUE, LINE = "#f3f5f9", "#ffffff", "#25354b", "#7d8ba1", "#4264ee", "#e4e9f1"
+PREVIEW_POLL_HZ = 60  # Check for newest video at display cadence, not the old 100 ms UI poll.
 
 
 class EventLoop:
@@ -67,6 +70,12 @@ class Application(tk.Tk):
         self.frames = {"input": None, "output": None}
         self.revisions = {"input": 0, "output": 0}
         self.displayed = {"input": -1, "output": -1}
+        self.presented_revisions = {"input": 0, "output": 0}
+        self.preview_counts = {"input": 0, "output": 0}
+        self.preview_times = {name: deque(maxlen=360) for name in ("input", "output")}
+        self.preview_rates = {name: tk.StringVar(value="预览显示 — FPS") for name in ("input", "output")}
+        self.preview_sample_counts = dict(self.preview_counts)
+        self.preview_sample_time = time.perf_counter()
         self.images, self.labels, self.metric_vars = {}, {}, {}
         self.engine = EventLoop()
         self.identity = self.agent = self.virtual_output = None
@@ -221,6 +230,8 @@ class Application(tk.Tk):
             tk.Label(box, text=caption, bg="#141c29", fg="#aab9d0", anchor="w", padx=15, pady=14, font=("Microsoft YaHei UI", 9)).grid(row=0, column=0, sticky="ew")
             label = tk.Label(box, bg="#141c29", fg="#778ba8", textvariable=variable, font=("Microsoft YaHei UI", 10), anchor="center", width=1, height=1)
             label.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 12))
+            tk.Label(box, textvariable=self.preview_rates[name], bg="#141c29", fg="#7e92af",
+                     font=("Microsoft YaHei UI", 8), anchor="e", padx=14, pady=6).grid(row=2, column=0, sticky="ew")
             self.labels[name], self.preview_boxes[name] = label, box
         tk.Label(content, text="接收原画 → 输入虚拟摄像头 → 换脸软件 → 采集结果 → 回传" if self.server else "本地采集 → 远程处理 → 返回结果 → 本地虚拟摄像头 → 直播伴侣", bg=WHITE, fg=MUTED, pady=12, font=("Microsoft YaHei UI", 9)).grid(row=3, column=0, sticky="ew")
         metrics = ttk.Frame(content, padding=(8, 14))
@@ -643,6 +654,7 @@ class Application(tk.Tk):
         variable = self.input_text if name == "input" else self.result_text
         variable.set(text)
         self.labels[name].configure(image="", textvariable=variable)
+        self.preview_rates[name].set("预览显示 — FPS")
 
     def add_log(self, value):
         self.status.set(value)
@@ -654,6 +666,7 @@ class Application(tk.Tk):
         self.logs.configure(state="disabled")
 
     def poll(self):
+        tick_started = time.perf_counter()
         try:
             for _ in range(100):
                 kind, value = self.messages.get_nowait()
@@ -764,12 +777,29 @@ class Application(tk.Tk):
                 fitted = fit_bgr(image, *size)
                 rgb = cv2.cvtColor(fitted, cv2.COLOR_BGR2RGB)
                 ppm = f"P6\n{size[0]} {size[1]}\n255\n".encode("ascii") + rgb.tobytes()
-                self.images[name] = tk.PhotoImage(master=self, data=ppm, format="PPM")
+                if name not in self.images:
+                    self.images[name] = tk.PhotoImage(master=self, data=ppm, format="PPM")
+                else:
+                    self.images[name].configure(data=ppm, format="PPM")
+                # Reuse the same Tk image; do not delete/reallocate it every frame.
                 label.configure(image=self.images[name], textvariable="")
                 label._last_size = size
                 self.displayed[name] = revision
+                if revision != self.presented_revisions[name]:
+                    self.preview_counts[name] += 1
+                    self.preview_times[name].append(time.perf_counter())
+                    self.presented_revisions[name] = revision
+        now = time.perf_counter()
+        sample_duration = now - self.preview_sample_time
+        if sample_duration >= 1:
+            for name in self.preview_counts:
+                fps = (self.preview_counts[name] - self.preview_sample_counts[name]) / sample_duration
+                self.preview_rates[name].set(f"预览显示 {fps:.1f} FPS")
+            self.preview_sample_counts = dict(self.preview_counts)
+            self.preview_sample_time = now
         if not self.closing:
-            self.after(100, self.poll)
+            elapsed_ms = (time.perf_counter() - tick_started) * 1000
+            self.after(max(1, math.ceil(1000 / PREVIEW_POLL_HZ - elapsed_ms)), self.poll)
 
     def close_window(self):
         if self.closing:

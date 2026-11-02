@@ -31,6 +31,11 @@ def parser():
     gui.add_argument("--smoke-report", help=argparse.SUPPRESS)
     gui.add_argument("--preview-camera", help="启动后直接本地预览指定设备；yy 表示 YY 开播")
     gui.add_argument("--portrait", action="store_true", help="本地预览使用 720×1280 竖屏")
+    render_test = sub.add_parser("preview-benchmark", help="用两路合成图测量界面实际预览绘制帧率")
+    render_test.add_argument("--seconds", type=int, default=5)
+    render_test.add_argument("--portrait", action="store_true")
+    render_test.add_argument("--legacy", action="store_true", help=argparse.SUPPRESS)
+    render_test.add_argument("--report", default="reports/preview-benchmark.json")
     doctor = sub.add_parser("doctor", help="检测 Windows / GPU / 摄像头 / 编码器")
     doctor.add_argument("--probe-nvenc", action="store_true")
     doctor.add_argument("--report", default="reports/environment.json")
@@ -204,6 +209,14 @@ def main():
     logging.basicConfig(level=logging.WARNING,
                         handlers=[RotatingFileHandler(report_root / "remote-gpu.log", maxBytes=2_000_000,
                                                       backupCount=2, encoding="utf-8")])
+    if args.command == "preview-benchmark":
+        from rgpu.preview_benchmark import run_preview_benchmark
+        result = run_preview_benchmark(args.seconds, args.portrait, args.legacy)
+        save_report(args.report, result)
+        console(json.dumps(result, ensure_ascii=False, indent=2))
+        if not result.get("ok"):
+            raise SystemExit(1)
+        return
     if args.command in (None, "gui"):
         from rgpu.gui import Application, launch
         if getattr(args, "smoke_report", None):

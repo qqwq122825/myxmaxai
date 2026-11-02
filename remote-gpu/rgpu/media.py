@@ -278,6 +278,7 @@ class FrameSink:
         self._latest = None
         self._gate = threading.Lock()
         self.exit = threading.Event()
+        self.frame_ready = threading.Event()
         self.ready = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True, name="Virtual camera output")
         self.thread.start()
@@ -291,6 +292,7 @@ class FrameSink:
             self._latest = frame
             self.last_frame = time.monotonic()
             self.count += 1
+            self.frame_ready.set()
 
     def _run(self):
         camera = None
@@ -303,21 +305,36 @@ class FrameSink:
             self.ready.set()
             black = np.zeros((self.settings.height, self.settings.width, 3), np.uint8)
             image = black
+            had_video = preview_stale = False
             interval = 1 / self.settings.fps
             while not self.exit.is_set():
+                if camera is None:
+                    # Preview-only sinks wake on actual input instead of sampling
+                    # a second 30 Hz timer, which otherwise loses frames by phase.
+                    self.frame_ready.wait(.05)
+                    if self.exit.is_set():
+                        break
                 started = time.monotonic()
                 with self._gate:
                     frame, self._latest = self._latest, None
+                    self.frame_ready.clear()
                     age = started - self.last_frame
                 if frame is not None:
                     image = fit_bgr(frame.to_ndarray(format="bgr24"), self.settings.width, self.settings.height)
+                    had_video, preview_stale = True, False
+                    changed = True
                 elif age > self.stale_seconds:
                     image = black
+                    changed = had_video and not preview_stale
+                    preview_stale = True
+                else:
+                    changed = False
                 if camera:
                     self.written += bool(camera.send(image))
-                if self.preview:
+                if self.preview and changed:
                     self.preview(image)
-                self.exit.wait(max(0, interval - (time.monotonic() - started)))
+                if camera is not None:
+                    self.exit.wait(max(0, interval - (time.monotonic() - started)))
         except Exception as ex:
             self.error = ex
             log.exception("视频输出停止")
@@ -337,4 +354,5 @@ class FrameSink:
 
     async def close(self):
         self.exit.set()
+        self.frame_ready.set()
         await asyncio.to_thread(self.thread.join, 5)

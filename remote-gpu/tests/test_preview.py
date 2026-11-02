@@ -9,6 +9,33 @@ from rgpu.media import CameraDevice, select_camera
 from rgpu.preview import preview_local
 
 
+async def test_preview_does_not_report_repeated_or_not_yet_received_frames():
+    import av
+    import numpy as np
+    from rgpu.media import FrameSink
+    seen = []
+    sink = FrameSink(VideoSettings(320, 240, 30, 1000),
+                     preview=lambda image: seen.append(bool(image.any())), stale_seconds=.3)
+    try:
+        await sink.wait_ready()
+        await asyncio.sleep(.1)
+        assert not seen  # An unopened return stream must keep the waiting placeholder.
+        sink.submit(av.VideoFrame.from_ndarray(np.full((240, 320, 3), 100, np.uint8), format="bgr24"))
+        deadline = asyncio.get_running_loop().time() + 2
+        while not seen and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(.01)
+        assert seen == [True]
+        await asyncio.sleep(.1)
+        assert seen == [True]  # No new frame: do not pretend the repeated image is 30 FPS.
+        await asyncio.sleep(.35)
+        assert seen == [True, False]  # Clear stale video exactly once.
+        await asyncio.sleep(.1)
+        assert seen == [True, False]
+    finally:
+        await sink.close()
+    assert not sink.thread.is_alive()
+
+
 def test_frozen_reports_use_user_directory_not_launcher_cwd(monkeypatch, tmp_path):
     import sys
     from rgpu.paths import reports_directory
