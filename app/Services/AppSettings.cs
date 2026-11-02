@@ -10,16 +10,20 @@ public sealed class AppSettings
     public string ProtectedApiKey { get; set; } = "";
     public bool GlobalEnvironment { get; set; } = true;
     public string CameraId { get; set; } = "";
+    public string CaptureBackend { get; set; } = "";
+    public string DirectShowCameraId { get; set; } = "";
     public string Mode { get; set; } = "charx";
     public string ReferenceUrl { get; set; } = "";
     public string ReferenceName { get; set; } = "";
     public string CustomPrompt { get; set; } = "";
     public bool FaceRestoration { get; set; }
-    public bool MirrorOutput { get; set; }
+    public bool MirrorInput { get; set; } = true;
     public bool FlipVertical { get; set; } = true;
     public int AutoStopMinutes { get; set; }
     public int OutputWidth { get; set; } = 720;
     public int OutputHeight { get; set; } = 1280;
+    public bool FillFrame { get; set; } = true;
+    public bool HighestQuality { get; set; } = true;
     public List<UserReference> UserReferences { get; set; } = [];
 
     private static string FilePath => Path.Combine(

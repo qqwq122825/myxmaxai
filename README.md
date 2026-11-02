@@ -16,6 +16,7 @@
 |---|---|
 | `app/` | C# / WPF / .NET 10 主程序 |
 | `app/Services/VirtualCamera.cs` | 生成画面缩放裁切到输出分辨率，写入虚拟摄像头共享内存 |
+| `app/Services/DirectShowCapture.cs` | FFmpeg / DirectShow 采集，支持 YY 开播等虚拟摄像头，再通过 SDK 外部帧接口输入 |
 | `app/Services/VirtualCameraInstaller.cs` | 一键注册 / 卸载虚拟摄像头驱动（UAC 授权一次） |
 | `vcam/` | 虚拟摄像头 DirectShow 驱动，改自 [UnityCapture](https://github.com/schellingb/UnityCapture)（MIT）：增加竖屏分辨率，并从 `HKCU\Software\FaceLive\VirtualCam` 读取程序里选的分辨率 |
 | `.github/workflows/build.yml` | 云端编译驱动 + 程序并打包 |
@@ -30,6 +31,15 @@ msbuild vcam/UnityCaptureFilter.vcxproj /p:Configuration=Release /p:Platform=x64
 # 3. 程序
 dotnet publish app -c Release -o out/FaceLive
 ```
+
+DirectShow 后端需要把 Windows x64 版 `ffmpeg.exe` 放进 `app/Tools/`，发布时会一并复制。
+可使用 DeepFaceLive 已附带的 FFmpeg，或从 https://ffmpeg.org/download.html 获取 Windows 构建。
+缺少 FFmpeg 时仍可手动选择 Media Foundation 后端使用系统摄像头。
+YY 开播输入选择 `DirectShow → YY开播`，无需选择进程；设备输入格式自动协商，预览不建立云端生成会话。
+分辨率在顶部“输出画布”手动选择；YY 采集端会请求同尺寸，不强制像素格式。
+原始与生成画面并排显示，支持填满裁剪或完整画面两种适配方式。
+生成画质默认“最高画质”：关闭 SDK 上传/接收的自动降档，从最高档开始，并优先保留编码画质。
+可切换“自适应”适配网络；界面分别显示实际生成尺寸和输出画布尺寸，放大输出会明确标注。
 
 ## 许可
 

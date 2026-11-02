@@ -27,6 +27,7 @@ public sealed unsafe class VirtualCamera : IDisposable
     private int[] xs0 = [], xs1 = [], xw = [], ys0 = [], ys1 = [], yw = [];
 
     public bool Mirror { get; set; }
+    public bool FillFrame { get; set; } = true;
 
     /// <summary>DirectShow RGB bitmaps are bottom-up, so rows are written in reverse to appear upright.</summary>
     public bool FlipVertical { get; set; } = true;
@@ -108,19 +109,30 @@ public sealed unsafe class VirtualCamera : IDisposable
         });
     }
 
-    /// <summary>Bilinear scale with center crop ("fill"), BGRA → RGBA, optional vertical flip.</summary>
+    /// <summary>Bilinear scale with center crop or letterboxing, BGRA → RGBA, optional vertical flip.</summary>
     private void CopyScaled(byte* src, int srcStride, int sw, int sh, uint* dst, int dw, int dh)
     {
-        BuildMaps(sw, sh, dw, dh);
+        int contentW = dw, contentH = dh;
+        if (!FillFrame)
+        {
+            double fit = Math.Min((double)dw / sw, (double)dh / sh);
+            contentW = Math.Clamp((int)Math.Round(sw * fit), 1, dw);
+            contentH = Math.Clamp((int)Math.Round(sh * fit), 1, dh);
+        }
+        int left = (dw - contentW) / 2, topOffset = (dh - contentH) / 2;
+        BuildMaps(sw, sh, contentW, contentH);
         bool flip = FlipVertical;
         int[] X0 = xs0, X1 = xs1, XW = xw, Y0 = ys0, Y1 = ys1, YW = yw;
         Parallel.For(0, dh, Options, y =>
         {
-            var r0 = (uint*)(src + (long)Y0[y] * srcStride);
-            var r1 = (uint*)(src + (long)Y1[y] * srcStride);
-            int fy = YW[y], iy = 256 - fy;
             var d = dst + (long)(flip ? dh - 1 - y : y) * dw;
-            for (int x = 0; x < dw; x++)
+            if (contentW != dw || contentH != dh) new Span<uint>(d, dw).Fill(0xFF000000u);
+            int sourceY = y - topOffset;
+            if (sourceY < 0 || sourceY >= contentH) return;
+            var r0 = (uint*)(src + (long)Y0[sourceY] * srcStride);
+            var r1 = (uint*)(src + (long)Y1[sourceY] * srcStride);
+            int fy = YW[sourceY], iy = 256 - fy;
+            for (int x = 0; x < contentW; x++)
             {
                 int x0 = X0[x], x1 = X1[x], fx = XW[x], ix = 256 - fx;
                 uint a = r0[x0], b = r0[x1], c = r1[x0], e = r1[x1];
@@ -132,7 +144,7 @@ public sealed unsafe class VirtualCamera : IDisposable
                 uint bottom = rb2 | ga2;
                 uint rbv = (((top & 0xFF00FFu) * (uint)iy + (bottom & 0xFF00FFu) * (uint)fy) >> 8) & 0xFF00FFu;
                 uint gav = (((top >> 8) & 0xFF00FFu) * (uint)iy + ((bottom >> 8) & 0xFF00FFu) * (uint)fy) & 0xFF00FF00u;
-                d[x] = Swap(rbv | gav);
+                d[x + left] = Swap(rbv | gav);
             }
         });
     }

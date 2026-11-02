@@ -22,5 +22,6 @@
   <ItemGroup>
     <EmbeddedResource Include="Assets/presets.json" LogicalName="FaceLive.presets.json" />
     <Content Include="VirtualCam/**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Tools/**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

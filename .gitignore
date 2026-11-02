@@ -1,10 +1,13 @@
 bin/
 obj/
 out/
+dist/
+FaceLive-win-x64.zip
 .build/
 vcam/Build/
 packages/*.nupkg
 app/VirtualCam/*.dll
+app/Tools/ffmpeg.exe
 *.user
 .vs/
 

@@ -1,0 +1,35 @@
+<Window x:Class="FaceLive.GeneratedPreviewWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="FaceLive · 生成画面大屏预览" Width="1200" Height="850" MinWidth="640" MinHeight="420"
+        Background="#05080E" WindowStartupLocation="CenterScreen" WindowState="Maximized"
+        PreviewKeyDown="Window_PreviewKeyDown">
+    <Grid x:Name="PreviewRoot" Background="#05080E">
+        <Grid.RowDefinitions><RowDefinition x:Name="HeaderRow" Height="56"/><RowDefinition Height="*"/><RowDefinition x:Name="FooterRow" Height="34"/></Grid.RowDefinitions>
+        <Border Background="{StaticResource Panel}" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="18,0">
+            <Grid>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="生成画面" FontSize="15" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="StateText" Text="等待生成" FontSize="11" Foreground="{StaticResource Muted}" Margin="14,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+                <CheckBox Grid.Column="1" Content="置顶" IsChecked="{Binding Topmost, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                <Button x:Name="FullscreenButton" Grid.Column="2" Content="全屏 · F11" Click="FullscreenButton_Click" Padding="12,7" Margin="0,0,10,0" VerticalAlignment="Center" FontSize="11"/>
+                <Button x:Name="StopButton" Grid.Column="3" Content="停止生成" Click="StopButton_Click" IsEnabled="False" Background="#4B2939" BorderBrush="#704052" Padding="12,7" VerticalAlignment="Center" FontSize="11"/>
+            </Grid>
+        </Border>
+        <Grid Grid.Row="1" ClipToBounds="True" Background="#05080E" MouseLeftButtonDown="Preview_MouseLeftButtonDown" ToolTip="双击或 F11 全屏，Esc 退出全屏">
+            <Rectangle x:Name="PreviewSurface" RenderOptions.BitmapScalingMode="HighQuality">
+                <Rectangle.Fill><VisualBrush x:Name="PreviewBrush" Stretch="Uniform" AlignmentX="Center" AlignmentY="Center"/></Rectangle.Fill>
+            </Rectangle>
+            <StackPanel x:Name="Placeholder" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
+                <TextBlock Text="等待生成画面" FontSize="22" HorizontalAlignment="Center"/>
+                <TextBlock Text="在主窗口开始生成后，这里会同步显示大画面" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,12,0,0"/>
+            </StackPanel>
+        </Grid>
+        <Grid Grid.Row="2" Margin="16,0">
+            <TextBlock x:Name="DimensionsText" Text="独立大屏预览" Foreground="{StaticResource Muted}" FontSize="10" VerticalAlignment="Center"/>
+            <TextBlock Text="双击 / F11 全屏 · Esc 返回 · 关闭预览不停止生成" Foreground="{StaticResource Muted}" FontSize="10" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+        </Grid>
+    </Grid>
+</Window>
