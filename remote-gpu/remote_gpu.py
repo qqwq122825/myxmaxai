@@ -39,6 +39,9 @@ def parser():
     doctor = sub.add_parser("doctor", help="检测 Windows / GPU / 摄像头 / 编码器")
     doctor.add_argument("--probe-nvenc", action="store_true")
     doctor.add_argument("--report", default="reports/environment.json")
+    camtest = sub.add_parser("camera-test", help="虚拟摄像头自检：写入测试画面并用 DirectShow / OpenCV / Media Foundation 读回")
+    camtest.add_argument("--channel", type=int, default=1, help="1 = 服务器给换脸软件的 Camera #2（默认）；0 = 本地直播输出")
+    camtest.add_argument("--report", default="reports/camera-selftest.json")
     test = sub.add_parser("selftest", help="不使用摄像头的本机 WebRTC 回环")
     test.add_argument("--seconds", type=int, default=6)
     test.add_argument("--report", default="reports/selftest.json")
@@ -234,6 +237,11 @@ def main():
         result = report(args.probe_nvenc)
         save_report(args.report, result)
         console(json.dumps(result, ensure_ascii=False, indent=2))
+    elif args.command == "camera-test":
+        from rgpu.camtest import virtual_camera_selftest
+        result = virtual_camera_selftest(channel=args.channel)
+        save_report(args.report, result.as_dict())
+        console(result.text())
     elif args.command == "cameras":
         from rgpu.media import list_cameras
         for device in list_cameras():

@@ -257,6 +257,8 @@ class Application(tk.Tk):
         self.log_open = tk.BooleanVar(value=False)
         ttk.Checkbutton(logbar, text="运行日志", variable=self.log_open, command=self.toggle_logs).pack(side="left")
         ttk.Button(logbar, text="环境检测", command=self.diagnose).pack(side="right")
+        if self.server:
+            ttk.Button(logbar, text="虚拟摄像头自检", command=self.camera_selftest).pack(side="right", padx=(0, 8))
         self.logs = tk.Text(content, height=5, bg=WHITE, fg="#7285a1", font=("Consolas", 9), relief="flat", state="disabled")
         self.logs.grid(row=6, column=0, sticky="ew", pady=(4, 0))
         self.logs.grid_remove()
@@ -672,6 +674,21 @@ class Application(tk.Tk):
             return f"环境检测已保存到 {path.resolve()}"
         self.background(run, "status")
 
+    def camera_selftest(self):
+        """Writes a test picture into Camera #2 and reads it back the way face-swap software would."""
+        if self.agent and self.agent.busy:
+            messagebox.showinfo("虚拟摄像头自检", "推流设备正在连接，Camera #2 正在使用中。\n请先停止服务，再进行自检。", parent=self)
+            return
+        self.emit("status", "正在自检虚拟摄像头（约 10 秒）……")
+        def run():
+            from .camtest import virtual_camera_selftest
+            result = virtual_camera_selftest(channel=1)
+            path = reports_directory() / time.strftime("camera-selftest-%Y%m%d-%H%M%S.json")
+            save_report(path, result.as_dict())
+            self.emit("camtest", result.text() + f"\n\n报告已保存：{path.resolve()}")
+            return result.verdict
+        self.background(run, "status")
+
     def change_view(self):
         if self.single.get():
             self.preview_boxes["input"].grid_remove()
@@ -786,6 +803,9 @@ class Application(tk.Tk):
                     if not self.server:
                         self.clear_preview("output", "等待下一次连接回传结果")
                     self.add_log("网络已停止；虚拟摄像头及结果预览可单独控制。")
+                elif kind == "camtest":
+                    self.add_log(value)
+                    messagebox.showinfo("虚拟摄像头自检", value, parent=self)
                 elif kind == "stats":
                     for key in ("input_fps", "return_fps", "rtt_ms"):
                         number = value.get(key)
