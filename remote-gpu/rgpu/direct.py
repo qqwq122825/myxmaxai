@@ -149,8 +149,9 @@ class DirectAgent:
         app.router.add_get("/health", self.health)
         app.router.add_get("/stream", self.stream)
         async def shutdown(_):
-            if self.ws is not None:
-                await self.ws.close(code=1001, message=b"Server stopping")
+            for ws in (self.ws, getattr(self, "viewer_ws", None)):
+                if ws is not None:
+                    await ws.close(code=1001, message=b"Server stopping")
         app.on_shutdown.append(shutdown)
         return app
 
@@ -267,7 +268,9 @@ async def serve_direct(agent, host, port, stop, on_ready=None):
 
 async def connect_direct(pairing_code, device, settings, stop, sink_target="unity:0",
                          status=log.info, preview=None, statistics=None, media_timeout=20,
-                         input_preview=None):
+                         input_preview=None, role="both"):
+    """role="both": upload and receive the result (classic). role="source": upload only (like the phone app);
+    the server forwards the result to a separate receiver started with connect_viewer()."""
     pairing = Pairing.decode(pairing_code) if isinstance(pairing_code, str) else pairing_code
     source = sink = input_sink = None
     counters = Counters(last_video=time.monotonic())
@@ -292,7 +295,10 @@ async def connect_direct(pairing_code, device, settings, stop, sink_target="unit
                                        timeout=aiohttp.ClientWSTimeout(ws_receive=media_timeout, ws_close=3),
                                        max_msg_size=MAX_MESSAGE, compress=0) as ws:
                 channel = SendChannel(ws)
-                await channel.send({"type": "start", "protocol": "direct-1", "video": asdict(settings)})
+                hello = {"type": "start", "protocol": "direct-1", "video": asdict(settings)}
+                if role != "both":
+                    hello["role"] = role
+                await channel.send(hello)
                 message = await asyncio.wait_for(ws.receive(), 10)
                 if message.type != aiohttp.WSMsgType.TEXT:
                     raise ConnectionError("服务器未返回直连确认。")
@@ -386,3 +392,125 @@ async def connect_direct(pairing_code, device, settings, stop, sink_target="unit
             await input_sink.close()
         if source is not None and isinstance(source, CameraTrack):
             await source.wait_closed()
+
+
+async def connect_viewer(pairing_code, stop, sink_target="unity:0", status=log.info, preview=None,
+                         statistics=None, media_timeout=20):
+    """Relay receiver (the PC): no camera, no upload. A phone pushes to the server; the server forwards
+    the processed result here, which goes to the virtual camera for the streaming software."""
+    pairing = Pairing.decode(pairing_code) if isinstance(pairing_code, str) else pairing_code
+    fingerprint = aiohttp.Fingerprint(bytes.fromhex(pairing.fingerprint))
+    headers = {"Authorization": "Bearer " + pairing.key}
+    timeout = aiohttp.ClientTimeout(total=15, connect=10)
+    counters = Counters(last_video=time.monotonic())
+    tasks, sink = [], None
+    rtt_ms, remote = None, {}
+    status(f"正在连接 {pairing.host}:{pairing.port}（只接收），验证服务器证书……")
+    try:
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout, trust_env=False) as http:
+            async with http.get(pairing.endpoint + "/health", ssl=fingerprint, allow_redirects=False) as response:
+                if response.status != 200:
+                    raise ConnectionError(f"服务器拒绝连接（HTTP {response.status}），请检查 Key。")
+                health = await response.json()
+                if health.get("protocol") != "direct-1":
+                    raise ValueError("两端直连协议不兼容。")
+                if "relay-roles" not in health.get("features", []):
+                    raise ValueError("服务器版本过旧，不支持“手机推流、电脑接收”，请先更新服务器程序。")
+                if health.get("viewer_busy"):
+                    raise ConnectionError("服务器已有接收端连接，请先停止旧连接。")
+            async with http.ws_connect(pairing.endpoint + "/stream", ssl=fingerprint, heartbeat=5,
+                                       timeout=aiohttp.ClientWSTimeout(ws_receive=media_timeout, ws_close=3),
+                                       max_msg_size=MAX_MESSAGE, compress=0) as ws:
+                channel = SendChannel(ws)
+                await channel.send({"type": "start", "protocol": "direct-1", "role": "viewer"})
+                message = await asyncio.wait_for(ws.receive(), 10)
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    raise ConnectionError("服务器未返回直连确认。")
+                ready = parse_control(message.data)
+                if ready.get("type") == "error":
+                    raise RuntimeError(ready.get("message", "服务器拒绝接收端。"))
+                if ready.get("type") != "ready" or ready.get("role") != "viewer":
+                    raise ValueError("直连确认格式不正确。")
+                status("已连接为接收端；等待手机推流并由服务器开始回传。")
+
+                state = {"active": False, "settings": None, "decoder": None, "clock": None}
+
+                async def apply_return_state(data):
+                    nonlocal sink
+                    state["active"] = bool(data.get("active"))
+                    video = data.get("video")
+                    if state["active"] and video:
+                        settings = VideoSettings(**video)
+                        if settings != state["settings"]:
+                            if sink:
+                                await sink.close()
+                            sink = FrameSink(settings, sink_target, preview)
+                            await sink.wait_ready()
+                            state["settings"] = settings
+                    # Each resumed return stream begins with a fresh H.264 keyframe.
+                    if state["settings"]:
+                        state["decoder"], state["clock"] = H264Decoder(state["settings"]), ReceiveClock()
+                    counters.last_video = time.monotonic()
+                    status(f"正在接收服务器转发的结果（{state['settings'].width}×{state['settings'].height}）。"
+                           if state["active"] and state["settings"] else "已连接；等待服务器开始回传结果。")
+
+                async def receive():
+                    nonlocal rtt_ms, remote
+                    async for message in ws:
+                        if message.type == aiohttp.WSMsgType.BINARY:
+                            counters.received_bytes += len(message.data)
+                            decoder = state["decoder"]
+                            if decoder is None:
+                                continue
+                            for frame in await asyncio.to_thread(decoder.decode, message.data):
+                                state["clock"].check(frame)
+                                sink.submit(frame)
+                                counters.received_frames += 1
+                                counters.last_video = time.monotonic()
+                        elif message.type == aiohttp.WSMsgType.TEXT:
+                            data = parse_control(message.data)
+                            if data.get("type") == "pong" and type(data.get("time")) in (int, float):
+                                rtt_ms = max(0, (time.perf_counter() - data["time"]) * 1000)
+                                remote = data
+                            elif data.get("type") == "return_state":
+                                await apply_return_state(data)
+                            elif data.get("type") == "error":
+                                raise RuntimeError(data.get("message", "服务器处理失败。"))
+                        elif message.type == aiohttp.WSMsgType.ERROR:
+                            raise ConnectionError("接收通道异常。")
+
+                async def report():
+                    previous_time = time.monotonic()
+                    previous_frames = previous_received = 0
+                    while True:
+                        await asyncio.sleep(1)
+                        now = time.monotonic()
+                        if state["active"] and now - counters.last_video > media_timeout:
+                            raise TimeoutError("服务器显示正在回传，但长时间未收到画面；请检查服务器结果来源。")
+                        if sink and sink.error:
+                            raise sink.error
+                        await channel.send({"type": "ping", "time": time.perf_counter()})
+                        elapsed = max(0.001, now - previous_time)
+                        if statistics:
+                            statistics({"return_fps": (counters.received_frames - previous_frames) / elapsed,
+                                        "input_fps": None, "upload_mbps": 0.0,
+                                        "download_mbps": (counters.received_bytes - previous_received) * 8 / elapsed / 1e6,
+                                        "rtt_ms": rtt_ms, "return_active": state["active"],
+                                        "source_connected": remote.get("source_connected"),
+                                        "frames": counters.received_frames, "transport": "TLS/TCP"})
+                        previous_time, previous_frames = now, counters.received_frames
+                        previous_received = counters.received_bytes
+
+                tasks = [asyncio.create_task(receive()), asyncio.create_task(report())]
+                await wait_for_streams(tasks, stop)
+                return {"frames": counters.received_frames, "transport": "TLS/TCP"}
+    except aiohttp.ServerFingerprintMismatch:
+        raise ConnectionError("服务器证书与 Key 不一致。请在服务器重新复制 Key。") from None
+    except aiohttp.ClientConnectorError:
+        raise ConnectionError("无法连接服务器。请检查公网 IP、端口映射、安全组和服务器防火墙。") from None
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if sink:
+            await sink.close()

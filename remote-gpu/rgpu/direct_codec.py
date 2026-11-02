@@ -7,6 +7,7 @@ import struct
 import av
 
 from .config import VideoSettings
+from .framelock import FRAME_CONVERT_LOCK
 
 HEADER = struct.Struct("!4sqHH")
 MAX_MESSAGE = 4 * 1024 * 1024
@@ -35,7 +36,8 @@ class H264Encoder:
             raise ValueError("视频尺寸与直连会话协商值不一致。")
         pts = int(frame.pts * frame.time_base / TIME_BASE) if frame.pts is not None and frame.time_base else self.last_pts + 90_000 // s.fps
         pts = max(self.last_pts + 1, pts)
-        image = frame.reformat(format="yuv420p")
+        with FRAME_CONVERT_LOCK:   # a preview thread may be converting this same frame
+            image = frame.reformat(format="yuv420p")
         image.pts, image.time_base = pts, TIME_BASE
         self.last_pts = pts
         result = []

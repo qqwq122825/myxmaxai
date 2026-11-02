@@ -15,6 +15,7 @@ from aiortc import VideoStreamTrack
 from aiortc.mediastreams import MediaStreamError
 
 from .config import VideoSettings
+from .framelock import FRAME_CONVERT_LOCK
 
 log = logging.getLogger(__name__)
 _camera_enumeration_lock = threading.Lock()
@@ -320,7 +321,9 @@ class FrameSink:
                     self.frame_ready.clear()
                     age = started - self.last_frame
                 if frame is not None:
-                    image = fit_bgr(frame.to_ndarray(format="bgr24"), self.settings.width, self.settings.height)
+                    with FRAME_CONVERT_LOCK:   # the encoder thread may be converting this same frame
+                        array = frame.to_ndarray(format="bgr24")
+                    image = fit_bgr(array, self.settings.width, self.settings.height)
                     had_video, preview_stale = True, False
                     changed = True
                 elif age > self.stale_seconds:

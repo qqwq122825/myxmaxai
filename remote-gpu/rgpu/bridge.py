@@ -102,12 +102,18 @@ class ManagedAgent(DirectAgent):
         self.return_changed = asyncio.Event()
         self.capture_lock = asyncio.Lock()
         self.receiving = False
+        # Relay mode: a phone ("source") uploads, a PC ("viewer") receives the result.
+        # A classic client ("both") uploads and receives on one connection and takes both slots.
+        self.viewer_busy = False
+        self.viewer_ws = None
+        self.return_counters = None   # counters of whichever connection carries the result
 
     async def health(self, request):
         response = await super().health(request)
         # Existing protocol framing, with an optional independently controlled return stream.
         data = __import__('json').loads(response.text)
-        data["features"] = ["independent-return", "window-capture"]
+        data["features"] = ["independent-return", "window-capture", "relay-roles"]
+        data["viewer_busy"] = self.viewer_busy
         return web.json_response(data)
 
     def capture_failed(self, error):
@@ -153,15 +159,19 @@ class ManagedAgent(DirectAgent):
 
     async def _return_loop(self, channel, settings, counters):
         origin = time.monotonic()
+        self.return_counters = counters
         while True:
             self.return_changed.clear()
             capture = self.capture
             active = bool(self.return_enabled and capture and capture.ready and not capture.error)
-            await channel.send({"type": "return_state", "active": active})
+            state = {"type": "return_state", "active": active}
+            if active:
+                state["video"] = asdict(capture.settings)   # a relay receiver learns the size here
+            await channel.send(state)
             if not active:
                 await self.return_changed.wait()
                 continue
-            sender = asyncio.create_task(send_video(capture.frames, channel, settings, counters, time_origin=origin))
+            sender = asyncio.create_task(send_video(capture.frames, channel, capture.settings, counters, time_origin=origin))
             changed = asyncio.create_task(self.return_changed.wait())
             try:
                 done, _ = await asyncio.wait([sender, changed], return_when=asyncio.FIRST_COMPLETED)
@@ -178,22 +188,86 @@ class ManagedAgent(DirectAgent):
                 await asyncio.gather(sender, changed, return_exceptions=True)
 
     async def stream(self, request):
-        async with self.lock:
-            if self.busy:
-                return web.json_response({"error": "已有本地端连接，请先停止旧连接。"}, status=409)
-            self.busy = True
+        # The role is in the first WebSocket message, so slots are claimed after the handshake.
         ws = web.WebSocketResponse(heartbeat=5, receive_timeout=20, max_msg_size=MAX_MESSAGE,
                                    writer_limit=65536, compress=False)
-        tasks, sink = [], None
+        await ws.prepare(request)
         try:
-            await ws.prepare(request)
-            self.ws = ws
             first = await asyncio.wait_for(ws.receive(), 10)
             if first.type != aiohttp.WSMsgType.TEXT:
                 raise ValueError("缺少视频会话参数。")
             hello = parse_control(first.data)
             if hello.get("type") != "start" or hello.get("protocol") != "direct-1":
                 raise ValueError("两端协议不兼容，请使用同一版本。")
+            role = hello.get("role", "both")
+            if role not in ("both", "source", "viewer"):
+                raise ValueError("未知的连接角色。")
+            async with self.lock:
+                taken = (self.busy if role == "source" else self.viewer_busy if role == "viewer"
+                         else self.busy or self.viewer_busy)
+                if taken:
+                    raise ConnectionError({"source": "已有推流设备连接，请先停止旧连接。",
+                                           "viewer": "已有接收端连接，请先停止旧连接。"}.get(role, "已有本地端连接，请先停止旧连接。"))
+                if role in ("both", "source"):
+                    self.busy = True
+                if role in ("both", "viewer"):
+                    self.viewer_busy = True
+        except Exception as ex:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(ws.send_json({"type": "error", "message": str(ex)}), 1)
+            with contextlib.suppress(Exception):
+                await ws.close()
+            return ws
+        if role == "viewer":
+            return await self._serve_viewer(ws)
+        return await self._serve_uploader(ws, hello, role)
+
+    async def _serve_viewer(self, ws):
+        """Relay receiver (the PC): gets the processed picture, uploads nothing."""
+        tasks = []
+        try:
+            self.viewer_ws = ws
+            channel, counters = SendChannel(ws), Counters(last_video=time.monotonic())
+            current = self.settings if self.busy else None
+            await channel.send({"type": "ready", "protocol": "direct-1", "mode": self.mode, "role": "viewer",
+                                "return_active": False, "video": asdict(current) if current else None})
+            self.status("接收端已连接；结果将转发到这台电脑。")
+            async def receive():
+                async for message in ws:
+                    if message.type == aiohttp.WSMsgType.TEXT:
+                        data = parse_control(message.data)
+                        if data.get("type") == "ping" and type(data.get("time")) in (float, int):
+                            await channel.send({"type": "pong", "time": data["time"],
+                                                "return_active": self.return_enabled, "mode": self.mode,
+                                                "source_connected": self.busy})
+                    elif message.type == aiohttp.WSMsgType.ERROR:
+                        raise ConnectionError("接收端通道异常。")
+            tasks = [asyncio.create_task(receive()),
+                     asyncio.create_task(self._return_loop(channel, self.settings, counters))]
+            await wait_for_streams(tasks)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            self.status(f"接收端连接停止：{ex}")
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(ws.send_json({"type": "error", "message": str(ex)}), 1)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            with contextlib.suppress(Exception):
+                await ws.close()
+            self.viewer_ws = None
+            self.viewer_busy = False
+            self.return_counters = None
+            self.status("接收端已断开；服务器继续等待。")
+        return ws
+
+    async def _serve_uploader(self, ws, hello, role):
+        """Classic client ("both": uploads and receives) or relay source (the phone: uploads only)."""
+        tasks, sink = [], None
+        try:
+            self.ws = ws
             settings = VideoSettings(**hello["video"])
             if self.capture and self.capture.settings != settings:
                 await self.stop_capture()
@@ -205,10 +279,13 @@ class ManagedAgent(DirectAgent):
             sink = FrameSink(settings, "none", self.preview)
             await sink.wait_ready()
             decoder, clock = H264Decoder(settings), ReceiveClock()
-            await channel.send({"type": "ready", "protocol": "direct-1", "mode": "managed",
+            await channel.send({"type": "ready", "protocol": "direct-1", "mode": "managed", "role": role,
                                 "return_active": False, "video": asdict(settings)})
-            self.return_enabled = False
-            self.status("已连接本地端，等待原画；结果回传需单独开启。")
+            if role == "both":
+                self.return_enabled = False
+                self.status("已连接本地端，等待原画；结果回传需单独开启。")
+            else:
+                self.status("推流设备已连接，等待原画；结果会转发给接收端。")
             async def receive():
                 async for message in ws:
                     if message.type == aiohttp.WSMsgType.BINARY:
@@ -239,16 +316,18 @@ class ManagedAgent(DirectAgent):
                     if sink.error:
                         raise sink.error
                     dt = max(.001, now - previous_time)
+                    returned = self.return_counters or counters   # relay: the result leaves on the viewer connection
                     if self.statistics:
                         self.statistics({"input_fps": (counters.received_frames - previous_input) / dt,
-                            "return_fps": (counters.sent_frames - previous_output) / dt,
-                            "upload_mbps": (counters.sent_bytes - previous_sent) * 8 / dt / 1e6,
+                            "return_fps": (returned.sent_frames - previous_output) / dt,
+                            "upload_mbps": (returned.sent_bytes - previous_sent) * 8 / dt / 1e6,
                             "download_mbps": (counters.received_bytes - previous_received) * 8 / dt / 1e6,
                             "return_active": self.return_enabled, "rtt_ms": None})
-                    previous_time, previous_input, previous_output = now, counters.received_frames, counters.sent_frames
-                    previous_sent, previous_received = counters.sent_bytes, counters.received_bytes
-            tasks = [asyncio.create_task(receive()), asyncio.create_task(report()),
-                     asyncio.create_task(self._return_loop(channel, settings, counters))]
+                    previous_time, previous_input, previous_output = now, counters.received_frames, returned.sent_frames
+                    previous_sent, previous_received = returned.sent_bytes, counters.received_bytes
+            tasks = [asyncio.create_task(receive()), asyncio.create_task(report())]
+            if role == "both":   # a relay source never receives the result
+                tasks.append(asyncio.create_task(self._return_loop(channel, settings, counters)))
             await wait_for_streams(tasks)
         except asyncio.CancelledError:
             raise
@@ -264,7 +343,13 @@ class ManagedAgent(DirectAgent):
                 await sink.close()
             with contextlib.suppress(Exception):
                 await ws.close()
-            self.return_enabled = self.receiving = self.busy = False
+            self.receiving = self.busy = False
+            if role == "both":
+                self.return_enabled = False
+                self.viewer_busy = False
+                self.status("本地端已断开；服务器等待新连接。")
+            else:
+                # Keep the relay return as it is: the phone may reconnect after a network blip.
+                self.status("推流设备已断开；接收端保持连接，等待手机重新推流。")
             self.ws = None
-            self.status("本地端已断开；服务器等待新连接。")
         return ws

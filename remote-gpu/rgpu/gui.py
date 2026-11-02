@@ -17,7 +17,7 @@ import cv2
 from . import __version__
 from .bridge import ManagedAgent, ResultSource
 from .config import VideoSettings
-from .direct import connect_direct, serve_direct
+from .direct import connect_direct, connect_viewer, serve_direct
 from .doctor import report, save_report
 from .media import fit_bgr, list_cameras, select_camera
 from .pairing import ConnectionKey, Pairing, load_identity
@@ -29,6 +29,9 @@ from .window_capture import list_windows
 
 BG, WHITE, INK, MUTED, BLUE, LINE = "#f3f5f9", "#ffffff", "#25354b", "#7d8ba1", "#4264ee", "#e4e9f1"
 PREVIEW_POLL_HZ = 60  # Check for newest video at display cadence, not the old 100 ms UI poll.
+
+
+LOCAL_MODES = ["本机摄像头推送并接收结果", "只接收（手机推流）"]
 
 
 class EventLoop:
@@ -97,6 +100,7 @@ class Application(tk.Tk):
         self.resolution = tk.StringVar(value="720P 竖屏 · 720×1280" if portrait else prefs.get("resolution", "720P 横屏 · 1280×720"))
         self.fps = tk.StringVar(value=str(prefs.get("fps", 30)))
         self.bitrate = tk.StringVar(value=str(prefs.get("bitrate", 4000)))
+        self.work_mode = tk.StringVar(value=prefs.get("work_mode", LOCAL_MODES[0]))
         self.source_type = tk.StringVar(value="独立窗口")
         self.method = tk.StringVar(value="Windows 图形采集（推荐）")
         self.crop_vars = [tk.StringVar(value="0") for _ in range(4)]
@@ -110,6 +114,9 @@ class Application(tk.Tk):
         self.default_camera_name = prefs.get("camera", "")
         self.pending_preview_camera = preview_camera
         self._build()
+        if not self.server:
+            self.work_mode.trace_add("write", lambda *_: self.update_mode_labels())
+            self.update_mode_labels()
         self.protocol("WM_DELETE_WINDOW", self.close_window)
         self.after(70, self.poll)
         self.after(150, self.refresh_devices)
@@ -284,6 +291,9 @@ class Application(tk.Tk):
         ttk.Button(row, text="显示 / 隐藏 Key", command=self.show_key).pack(side="right")
         self.help(f, "只填服务器地址和 Key 即可。地址可写 IP:端口，不写端口时默认 8766。")
         f = self.section(2, "本地画面")
+        self.field(f, "工作模式", self.work_mode, LOCAL_MODES)
+        self.help(f, "选“只接收（手机推流）”时，手机 App 推送摄像头画面，这台电脑不采集、不上传，只接收服务器转发的结果。"
+                     "画面尺寸用于虚拟摄像头输出。")
         self.camera_box = self.field(f, "采集来源", values=["测试画面"])
         self.camera_box.current(0)
         self.field(f, "画面尺寸", self.resolution, ["720P 横屏 · 1280×720", "720P 竖屏 · 720×1280", "360P 流畅 · 640×360"])
@@ -492,6 +502,7 @@ class Application(tk.Tk):
         value = {"public_host": self.public_host.get(), "listen_port": self.listen_port.get(), "public_port": self.public_port.get(),
                  "input_vcam": self.use_input_vcam.get()} if self.server else {
                  "address": self.address.get(), "fingerprint": self.fingerprint.get(), "camera": self.camera_box.get(),
+                 "work_mode": self.work_mode.get(),
                  "resolution": self.resolution.get(), "fps": self.fps.get(), "bitrate": self.bitrate.get()}
         # The local bearer key stays in memory; the server identity persists separately.
         save_preferences(self.role, value)
@@ -538,6 +549,21 @@ class Application(tk.Tk):
                     self.network_stop = asyncio.Event()
                     await serve_direct(self.agent, "0.0.0.0", port, self.network_stop,
                                        on_ready=lambda: self.emit("listening"))
+            elif self.relay_mode():
+                settings = self.video_settings()
+                pair = pairing_from_fields(self.address.get(), self.key.get(), self.fingerprint.get())
+                self.settings = settings
+                self.configure_output(settings)   # virtual camera size; received frames are fitted to it
+                async def operation():
+                    if self.preview_task and not self.preview_task.done():
+                        old_preview_task = self.preview_task
+                        old_preview_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await old_preview_task
+                    self.network_stop = asyncio.Event()
+                    await connect_viewer(pair, self.network_stop, "none",
+                        status=lambda s: self.emit("status", s), preview=lambda image: self.show_frame("output", image),
+                        statistics=lambda data: self.emit("stats", data))
             else:
                 settings, device = self.video_settings(), self.local_input()
                 pair = pairing_from_fields(self.address.get(), self.key.get(), self.fingerprint.get())
@@ -565,6 +591,17 @@ class Application(tk.Tk):
                 self.network_stop = None
                 self.emit("network_done")
         self.network_future = self.schedule(network())
+
+    def relay_mode(self):
+        return not self.server and self.work_mode.get() == LOCAL_MODES[1]
+
+    def update_mode_labels(self):
+        relay = self.relay_mode()
+        self.start_button.configure(text="启动接收" if relay else "启动推送")
+        self.stop_button.configure(text="停止接收" if relay else "停止推送")
+        if not self.network_active():
+            self.status.set("填写服务器地址和 Key，点击“启动接收”，再在手机上连接同一服务器。" if relay
+                            else "填写服务器地址和 Key，再点击“启动推送”。")
 
     def stop_work(self):
         if self.network_future and not self.network_future.done():
