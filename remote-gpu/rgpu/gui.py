@@ -6,6 +6,9 @@ from collections import deque
 import contextlib
 from concurrent.futures import CancelledError
 import queue
+from pathlib import Path
+import subprocess
+import sys
 import math
 import threading
 import time
@@ -16,9 +19,9 @@ import cv2
 
 from . import __version__
 from .bridge import ManagedAgent, ResultSource
-from .config import VideoSettings
+from .config import VideoSettings, VIDEO_PRESETS
 from .direct import connect_direct, connect_viewer, serve_direct
-from .doctor import report, save_report, input_driver_update_required
+from .doctor import report, save_report, input_driver_update_required, driver_update_required
 from .media import fit_bgr, list_cameras, select_camera
 from .pairing import ConnectionKey, Pairing, load_identity
 from .paths import reports_directory
@@ -26,6 +29,7 @@ from .preview import preview_local
 from .runtime import (VirtualOutput, load_preferences, pairing_from_fields,
                       public_ip, save_preferences)
 from .window_capture import list_windows
+from .widgets import ScrollRail, bind_form_wheel
 
 BG, WHITE, INK, MUTED, BLUE, LINE = "#f3f5f9", "#ffffff", "#25354b", "#7d8ba1", "#4264ee", "#e4e9f1"
 PREVIEW_POLL_HZ = 60  # Check for newest video at display cadence, not the old 100 ms UI poll.
@@ -93,6 +97,7 @@ class Application(tk.Tk):
         self.capture_ready, self.returning, self.closing = False, False, False
         self.settings = VideoSettings(720, 1280) if portrait else VideoSettings()
         prefs = load_preferences(role)
+        self.mirror = tk.BooleanVar(value=bool(prefs.get("mirror", False)))
         self.address = tk.StringVar(value=prefs.get("address", ""))
         self.key = tk.StringVar()
         self.fingerprint = tk.StringVar(value=prefs.get("fingerprint", ""))
@@ -166,6 +171,7 @@ class Application(tk.Tk):
         style.configure("TLabel", background=WHITE, foreground=INK)
         style.configure("Muted.TLabel", foreground=MUTED, font=("Microsoft YaHei UI", 9))
         style.configure("TButton", padding=(10, 7), background=WHITE, bordercolor=LINE, foreground="#5c6d88")
+        style.configure("Small.TButton", padding=(7, 3), font=("Microsoft YaHei UI", 9))
         style.map("TButton", background=[("active", "#f0f3fc")])
         style.configure("Primary.TButton", background=BLUE, foreground=WHITE, bordercolor=BLUE)
         style.map("Primary.TButton", background=[("disabled", "#aab9f4"), ("active", "#3456dd")], foreground=[("disabled", WHITE)])
@@ -198,19 +204,21 @@ class Application(tk.Tk):
         scroll.grid(row=1, column=0, sticky="nsew")
         scroll.rowconfigure(0, weight=1)
         scroll.columnconfigure(0, weight=1)
-        self.canvas = tk.Canvas(scroll, bg=WHITE, highlightthickness=0, width=320)
+        self.canvas = tk.Canvas(scroll, bg=WHITE, highlightthickness=0, width=320, yscrollincrement=1)
         self.canvas.grid(row=0, column=0, sticky="nsew")
-        bar = ttk.Scrollbar(scroll, orient="vertical", command=self.canvas.yview)
-        bar.grid(row=0, column=1, sticky="ns")
+        bar = self.scroll_rail = ScrollRail(scroll, command=self.canvas.yview)
+        bar.grid(row=0, column=1, sticky="ns", padx=(0, 4), pady=3)
         self.canvas.configure(yscrollcommand=bar.set)
         self.form = ttk.Frame(self.canvas, padding=(20, 0, 14, 15))
         window = self.canvas.create_window((0, 0), window=self.form, anchor="nw")
         self.form.bind("<Configure>", lambda _: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(window, width=e.width))
-        self.canvas.bind("<MouseWheel>", lambda e: self.canvas.yview_scroll(-int(e.delta / 120), "units"))
         self._server_form() if self.server else self._local_form()
+        bind_form_wheel(self, self.canvas, bar)
         actions = ttk.Frame(side, padding=(20, 12, 20, 16))
         actions.grid(row=2, column=0, sticky="ew")
+        if not self.server:
+            self._local_output_controls(actions)
         self.start_button = ttk.Button(actions, text="启动接收" if self.server else "启动推送", command=self.start, style="Primary.TButton")
         self.start_button.pack(fill="x")
         self.stop_button = ttk.Button(actions, text="停止服务" if self.server else "停止推送", command=self.stop_work, state="disabled")
@@ -302,23 +310,37 @@ class Application(tk.Tk):
                      "画面尺寸用于虚拟摄像头输出。")
         self.camera_box = self.field(f, "采集来源", values=["测试画面"])
         self.camera_box.current(0)
-        self.field(f, "画面尺寸", self.resolution, ["720P 横屏 · 1280×720", "720P 竖屏 · 720×1280", "360P 流畅 · 640×360"])
+        self.resolution_box = self.field(f, "画面尺寸", self.resolution, list(VIDEO_PRESETS))
+        self.resolution_box.bind("<<ComboboxSelected>>", self.change_video_settings)
         row = ttk.Frame(f)
         row.pack(fill="x")
         for variable, name in ((self.fps, "帧率 FPS"), (self.bitrate, "码率 Kbps")):
             col = ttk.Frame(row)
             col.pack(side="left", fill="x", expand=True, padx=(0, 5))
-            self.field(col, name, variable)
+            entry = self.field(col, name, variable)
+            if variable is self.fps:
+                entry.bind("<Return>", self.change_video_settings)
+                entry.bind("<FocusOut>", self.change_video_settings)
         row = ttk.Frame(f)
         row.pack(fill="x", pady=(10, 0))
         self.preview_button = ttk.Button(row, text="仅本地预览", command=self.start_preview)
         self.preview_button.pack(side="left")
         ttk.Button(row, text="刷新设备", command=self.refresh_devices).pack(side="right")
-        f = self.section(3, "接收与直播输出")
-        self.vcam_button = ttk.Button(f, text="开启虚拟摄像头", command=self.toggle_virtual)
-        self.vcam_button.pack(fill="x")
+    def _local_output_controls(self, f):
+        heading = ttk.Frame(f)
+        heading.pack(fill="x", pady=(0, 7))
+        ttk.Label(heading, text="虚拟摄像头 · 直播输出", font=("Microsoft YaHei UI", 10, "bold")).pack(side="left")
+        ttk.Button(heading, text="检查输出", command=self.check_output_virtual, style="Small.TButton").pack(side="right")
+        ttk.Checkbutton(f, text="直播输出左右镜像", variable=self.mirror, command=self.change_mirror).pack(anchor="w", pady=(0, 7))
+        row = ttk.Frame(f)
+        row.pack(fill="x")
+        self.vcam_start = ttk.Button(row, text="启动虚拟摄像头", command=self.start_virtual, style="Primary.TButton")
+        self.vcam_start.pack(side="left", fill="x", expand=True, padx=(0, 7))
+        self.vcam_stop = ttk.Button(row, text="关闭虚拟摄像头", command=self.stop_virtual, state="disabled")
+        self.vcam_stop.pack(side="left", fill="x", expand=True)
         self.help(f, variable=self.output_status)
-        self.help(f, "在直播伴侣中选择 FaceLive Camera。没有回传时输出黑色等待画面。")
+        ttk.Label(f, text="直播伴侣选择 FaceLive Camera，仅保留一路。", style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Separator(f).pack(fill="x", pady=(12, 12))
 
     def _server_form(self):
         f = self.section(1, "服务器接入")
@@ -339,6 +361,8 @@ class Application(tk.Tk):
         self.config_toggle = ttk.Button(f, text="收起连接设置", command=self.toggle_config)
         self.config_toggle.pack(fill="x", pady=(7, 0))
         f = self.section(2, "接收并提供换脸输入")
+        ttk.Checkbutton(f, text="输入画面左右镜像", variable=self.mirror, command=self.change_mirror).pack(anchor="w", pady=(0, 7))
+        self.help(f, "只翻转送给换脸软件的输入及左侧预览。手机前置预览和实际推流可能方向不同，按收到的画面校正。")
         self.input_vcam_start = ttk.Button(f, text="启动输入虚拟摄像头并自检", command=self.start_input_virtual, style="Primary.TButton")
         self.input_vcam_start.pack(fill="x")
         row = ttk.Frame(f)
@@ -477,8 +501,10 @@ class Application(tk.Tk):
         self.background(list_windows, "windows")
 
     def video_settings(self):
-        text = self.resolution.get()
-        width, height = (720, 1280) if "竖屏" in text else (640, 360) if "360" in text else (1280, 720)
+        try:
+            width, height = VIDEO_PRESETS[self.resolution.get()]
+        except KeyError:
+            raise ValueError("请选择受支持的画面尺寸。") from None
         return VideoSettings(width, height, int(self.fps.get()), int(self.bitrate.get()))
 
     def local_input(self):
@@ -498,19 +524,90 @@ class Application(tk.Tk):
         if self.virtual_output:
             self.virtual_output.close()
         self.virtual_output = VirtualOutput(settings, 1 if self.server else 0, status=lambda s: self.emit("error", s))
+        self.virtual_output.mirror = self.mirror.get()
         self.virtual_output.enabled = enabled
         if checking and self.server and enabled:
             self.input_vcam_result("输入规格已变化，正在重新检查虚拟摄像头……")
             self.vcam_recheck_pending = True
 
     def toggle_virtual(self):
+        # Kept for integrations using the previous single-button action.
+        self.stop_virtual() if self.virtual_output and self.virtual_output.enabled else self.start_virtual()
+
+    def output_settings(self):
+        # Relay reception has no local upload size to preserve. Its virtual
+        # camera must use the current output selection, even while connected.
+        return self.settings if self.network_active() and not self.relay_mode() else self.video_settings()
+
+    def output_description(self):
+        settings = self.virtual_output.settings
+        return f"FaceLive Camera · {settings.width}×{settings.height} / {settings.fps} FPS"
+
+    def change_video_settings(self, _event=None):
         try:
-            self.configure_output(self.video_settings() if not self.network_active() else self.settings)
-            self.virtual_output.enabled = not self.virtual_output.enabled
-            self.output_status.set("已开启 FaceLive Camera；等待回传时输出黑画面。" if self.virtual_output.enabled else "虚拟摄像头已关闭，推送状态不变。")
-            self.vcam_button.configure(text="关闭虚拟摄像头" if self.virtual_output.enabled else "开启虚拟摄像头")
+            requested = self.video_settings()
+            self.save_settings()
+            if self.network_active() and not self.relay_mode():
+                self.emit("status", "推送尺寸/帧率将在停止并重新启动推送后生效。")
+                return
+            changed = self.virtual_output is not None and self.virtual_output.settings != requested
+            self.configure_output(requested)
+            if self.virtual_output.enabled:
+                message = "已配置输出 " + self.output_description()
+                if changed:
+                    message += "；请重新打开直播伴侣的摄像头以刷新分辨率。"
+                self.output_status.set(message)
+            else:
+                self.output_status.set("待启动输出 " + self.output_description())
+            self.sync_virtual_buttons()
         except Exception as ex:
             self.emit("error", str(ex))
+
+    def start_virtual(self):
+        try:
+            requested = self.output_settings()
+            changed = self.virtual_output is not None and self.virtual_output.settings != requested
+            self.configure_output(requested)
+            if self.virtual_output and self.virtual_output.enabled:
+                if changed:
+                    self.output_status.set("已配置输出 " + self.output_description() + "；请重新打开直播伴侣的摄像头以刷新分辨率。")
+                return
+            if driver_update_required(0):
+                self.add_log("本机已安装驱动与包内版本不同；这不代表不可用。如读不到画面，可检查输出并按需更新驱动。")
+            self.virtual_output.enabled = True
+            self.output_status.set("已启动 " + self.output_description() + "；等待回传时输出黑画面。")
+            self.save_settings()
+            self.sync_virtual_buttons()
+        except Exception as ex:
+            self.emit("error", str(ex))
+
+    def stop_virtual(self):
+        if self.virtual_output:
+            self.virtual_output.enabled = False
+        self.output_status.set("虚拟摄像头已关闭；网络接收继续。")
+        self.sync_virtual_buttons()
+
+    def sync_virtual_buttons(self):
+        enabled = bool(self.virtual_output and self.virtual_output.enabled)
+        self.vcam_start.configure(state="disabled" if enabled else "normal")
+        self.vcam_stop.configure(state="normal" if enabled else "disabled")
+
+    def change_mirror(self):
+        if self.virtual_output:
+            self.virtual_output.mirror = self.mirror.get()
+        self.displayed["input" if self.server else "output"] = -1
+        self.save_settings()
+
+    def check_output_virtual(self):
+        """Independent read-only process; it never writes or opens another camera."""
+        try:
+            command = [sys.executable]
+            if not getattr(sys, "frozen", False):
+                command.append(str(Path(__file__).resolve().parents[1] / "remote_gpu.py"))
+            subprocess.Popen(command + ["check-vcam", "--channel", "0"],
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError as ex:
+            self.emit("error", f"无法启动输出摄像头检查器：{ex}")
 
     def toggle_input_virtual(self):
         self.start_input_virtual() if self.use_input_vcam.get() else self.stop_input_virtual()
@@ -553,11 +650,7 @@ class Application(tk.Tk):
         if self.closing or not self.virtual_output or not self.virtual_output.enabled or self.vcam_readers:
             return
         if input_driver_update_required():
-            self.stop_input_virtual()
-            text = "已安装的 Camera #2 驱动与新版不一致。请关闭换脸软件，以管理员运行 deploy\\install-driver.ps1，再启动自检。"
-            self.input_vcam_result(text, "fail")
-            self.add_log(text)
-            return
+            self.add_log("Camera #2 已安装驱动与包内文件不同；继续实际写入和读回自检，文件不同本身不判为不可用。")
         from .camtest import test_pattern
         from .vcam_probe import _Reader
         self.virtual_output.diagnostic_image(test_pattern(self.settings.width, self.settings.height))
@@ -621,6 +714,7 @@ class Application(tk.Tk):
                  "work_mode": self.work_mode.get(),
                  "resolution": self.resolution.get(), "fps": self.fps.get(), "bitrate": self.bitrate.get()}
         # The local bearer key stays in memory; the server identity persists separately.
+        value["mirror"] = self.mirror.get()
         save_preferences(self.role, value)
 
     def start_preview(self):
@@ -946,7 +1040,7 @@ class Application(tk.Tk):
                 self.capture_status.set("结果采集失败，请重新预览；原画接收仍可继续。")
                 self.capture_ready = False
         if self.virtual_output and not self.server:
-            self.vcam_button.configure(text="关闭虚拟摄像头" if self.virtual_output.enabled else "开启虚拟摄像头")
+            self.sync_virtual_buttons()
         for name, label in self.labels.items():
             if name == "input" and self.single.get():
                 continue
@@ -955,6 +1049,8 @@ class Application(tk.Tk):
             size = max(1, label.winfo_width()), max(1, label.winfo_height())
             if image is not None and (revision != self.displayed[name] or getattr(label, "_last_size", None) != size):
                 fitted = fit_bgr(image, *size)
+                if name == ("input" if self.server else "output") and self.mirror.get():
+                    fitted = cv2.flip(fitted, 1)
                 rgb = cv2.cvtColor(fitted, cv2.COLOR_BGR2RGB)
                 ppm = f"P6\n{size[0]} {size[1]}\n255\n".encode("ascii") + rgb.tobytes()
                 if name not in self.images:

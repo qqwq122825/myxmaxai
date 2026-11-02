@@ -34,10 +34,22 @@
 #include <math.h>
 #pragma comment(lib, "advapi32.lib")
 
+#ifdef FACELIVE_VIDEO_TEST
+#define CaptureSourceName L"Sony ZV-E10"
+#define CAPTURE_SETTINGS_KEY L"Software\\FaceLive\\VideoTest"
+#else
 #define CaptureSourceName L"FaceLive Camera"
+#define CAPTURE_SETTINGS_KEY L"Software\\FaceLive\\VirtualCam"
+#endif
 
 //Use separate GUIDs for 64bit and 32bit so both can be installed at the same time
-#ifdef _WIN64
+#if defined(FACELIVE_VIDEO_TEST) && defined(_WIN64)
+DEFINE_GUID(CLSID_UnityCaptureService,    0x2c64a7e9, 0x8531, 0x4f79, 0x9c, 0xc1, 0xa3, 0x22, 0x67, 0x08, 0x00, 0x10);
+DEFINE_GUID(CLSID_UnityCaptureProperties, 0x2c64a7e9, 0x8531, 0x4f79, 0x9c, 0xc1, 0xa3, 0x22, 0x67, 0x08, 0x00, 0x11);
+#elif defined(FACELIVE_VIDEO_TEST)
+DEFINE_GUID(CLSID_UnityCaptureService,    0x2c64a7e9, 0x8531, 0x4f79, 0x9c, 0xc1, 0xa3, 0x22, 0x67, 0x08, 0x00, 0x20);
+DEFINE_GUID(CLSID_UnityCaptureProperties, 0x2c64a7e9, 0x8531, 0x4f79, 0x9c, 0xc1, 0xa3, 0x22, 0x67, 0x08, 0x00, 0x21);
+#elif defined(_WIN64)
 DEFINE_GUID(CLSID_UnityCaptureService,    0x5c2cd55c, 0x92ad, 0x4999, 0x86, 0x66, 0x91, 0x2b, 0xd3, 0xe7, 0x00, 0x10);
 DEFINE_GUID(CLSID_UnityCaptureProperties, 0x5c2cd55c, 0x92ad, 0x4999, 0x86, 0x66, 0x91, 0x2b, 0xd3, 0xe7, 0x00, 0x11);
 #else
@@ -82,9 +94,9 @@ static bool FaceLiveGetPreferredSize(int channel, int& w, int& h)
 {
 	HKEY key;
 	wchar_t path[128];
-	StringCchPrintfW(path, 128, L"Software\\FaceLive\\VirtualCam\\Channels\\%d", channel);
+	StringCchPrintfW(path, 128, CAPTURE_SETTINGS_KEY L"\\Channels\\%d", channel);
 	if (channel == 0 || RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_READ, &key) != ERROR_SUCCESS)
-		if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\FaceLive\\VirtualCam", 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
+		if (RegOpenKeyExW(HKEY_CURRENT_USER, CAPTURE_SETTINGS_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
 	DWORD W = 0, H = 0, size = sizeof(DWORD), type = 0;
 	bool ok = (RegQueryValueExW(key, L"Width", NULL, &type, (LPBYTE)&W, &size) == ERROR_SUCCESS && type == REG_DWORD);
 	size = sizeof(DWORD);

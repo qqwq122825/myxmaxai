@@ -84,3 +84,40 @@ def test_selfcheck_pattern_never_replaces_fresh_input_and_is_removed_after_check
         assert not output.has_fresh_input()
     finally:
         output.close()
+
+
+def test_mirror_changes_live_pixels_without_mutating_input_or_selfcheck(monkeypatch):
+    from rgpu import unity
+    seen = []
+    class FakeCamera:
+        def __init__(self, *args): pass
+        def send(self, image):
+            seen.append(image.copy())
+            return True
+        def close(self): pass
+    monkeypatch.setattr(unity, "UnityCamera", FakeCamera)
+    image = np.zeros((240, 320, 3), np.uint8)
+    image[:, :80] = (10, 70, 180)
+    original = image.copy()
+    output = VirtualOutput(VideoSettings(320, 240, 30, 1000), 1)
+    def until(expected):
+        deadline = time.monotonic() + 2
+        while not any(np.array_equal(frame, expected) for frame in seen) and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert any(np.array_equal(frame, expected) for frame in seen)
+    try:
+        output.mirror = True
+        output.submit_image(image)
+        output.enabled = True
+        until(image[:, ::-1])
+        assert np.array_equal(image, original)
+        seen.clear()
+        output.mirror = False
+        until(original)
+        seen.clear()
+        output.clear()
+        output.mirror = True
+        output.diagnostic_image(original)
+        until(original)  # Selfcheck color locations stay known even with mirror enabled.
+    finally:
+        output.close()

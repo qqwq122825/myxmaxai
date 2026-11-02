@@ -9,6 +9,33 @@ from urllib.parse import urlsplit
 
 from aiortc import RTCConfiguration, RTCIceServer
 
+MAX_VIDEO_EDGE = 1920
+MAX_VIDEO_PIXELS = 1920 * 1080
+VIDEO_PRESETS = {
+    "720P 横屏 · 1280×720": (1280, 720),
+    "720P 竖屏 · 720×1280": (720, 1280),
+    "1080P 横屏 · 1920×1080": (1920, 1080),
+    "1080P 竖屏 · 1080×1920": (1080, 1920),
+    "360P 流畅 · 640×360": (640, 360),
+}
+
+
+def video_limits():
+    return {"max_width": MAX_VIDEO_EDGE, "max_height": MAX_VIDEO_EDGE,
+            "max_pixels": MAX_VIDEO_PIXELS, "max_fps": 30, "max_bitrate_kbps": 15000}
+
+
+def check_remote_video_size(health, settings):
+    # Releases before 0.4.6 have no advertised limits and accept at most 720p.
+    limits = health.get("video_limits", {})
+    defaults = {"max_width": 1280, "max_height": 1280, "max_pixels": 1280 * 720}
+    requested = {"max_width": settings.width, "max_height": settings.height,
+                 "max_pixels": settings.width * settings.height}
+    for name, value in requested.items():
+        limit = limits.get(name, defaults[name]) if isinstance(limits, dict) else defaults[name]
+        if type(limit) is not int or limit < value:
+            raise ValueError("服务器尚不支持所选视频尺寸；1080p 请先将服务器更新至 0.4.6 或更新版本，或改选 720p。")
+
 
 def private_address(address: str) -> bool:
     try:
@@ -59,10 +86,10 @@ class VideoSettings:
     def __post_init__(self):
         if any(type(v) is not int for v in asdict(self).values()):
             raise ValueError("视频参数必须为整数。")
-        if not (160 <= self.width <= 1280 and 120 <= self.height <= 1280
-                and self.width * self.height <= 1280 * 720
+        if not (160 <= self.width <= MAX_VIDEO_EDGE and 120 <= self.height <= MAX_VIDEO_EDGE
+                and self.width * self.height <= MAX_VIDEO_PIXELS
                 and self.width % 4 == 0 and self.height % 2 == 0):
-            raise ValueError("本原型最多 720p（横屏或竖屏），宽须为 4 的倍数、高须为偶数。")
+            raise ValueError("最多支持 1080p（1920×1080 或 1080×1920），宽须为 4 的倍数、高须为偶数。")
         if not 5 <= self.fps <= 30 or not 500 <= self.bitrate_kbps <= 15000:
             raise ValueError("帧率须为 5–30，目标码率须为 500–15000 Kbps。")
 

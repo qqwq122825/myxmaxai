@@ -91,9 +91,11 @@ struct PixelTest
 int main()
 {
     const int sizes[][4] = {{1280,720,1280,720}, {1280,720,960,540},
-        {720,1280,1280,720}, {720,1280,960,540}, {720,1280,720,1280}};
+        {720,1280,1280,720}, {720,1280,960,540}, {720,1280,720,1280},
+        {1920,1080,1920,1080}, {1080,1920,1080,1920}, {1080,1920,1920,1080},
+        {1080,1920,720,1280}, {720,1280,1080,1920}, {1920,1080,1080,1920}};
     bool ok = true;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i)
         for (int bpp = 3; bpp <= 4; ++bpp)
             for (int padding = 0; padding <= 8; padding += 8)
                 ok = PixelTest::Run(sizes[i][0], sizes[i][1], sizes[i][2], sizes[i][3], bpp, padding) && ok;

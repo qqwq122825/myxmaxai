@@ -15,6 +15,12 @@
 
 #define MAX_SHARED_IMAGE_SIZE (3840 * 2160 * 4 * sizeof(short)) //4K (RGBA max 16bit per pixel)
 
+#ifdef FACELIVE_VIDEO_TEST
+#define CAPTURE_MEMORY_PREFIX "FaceLiveVideoTest"
+#else
+#define CAPTURE_MEMORY_PREFIX "UnityCapture"
+#endif
+
 #if _DEBUG
 #define UCASSERT(cond) ((cond) ? ((void)0) : *(volatile int*)0 = 0xbad|(OutputDebugStringA("[FAILED ASSERT] " #cond "\n"),1))
 #else
@@ -99,10 +105,10 @@ private:
 		UCASSERT(m_CapNum <= MAX_CAPNUM);
 		if (m_CapNum > MAX_CAPNUM) m_CapNum = MAX_CAPNUM;
 		char CSCapNumChar = (m_CapNum ? '0' + m_CapNum : '\0'); //use NULL terminator for CapNum 0 to be compatible with old filter DLLs before multi cap
-		char CS_NAME_MUTEX      [] = "UnityCapture_Mutx0"; CS_NAME_MUTEX      [sizeof(CS_NAME_MUTEX      ) - 2] = CSCapNumChar;
-		char CS_NAME_EVENT_WANT [] = "UnityCapture_Want0"; CS_NAME_EVENT_WANT [sizeof(CS_NAME_EVENT_WANT ) - 2] = CSCapNumChar;
-		char CS_NAME_EVENT_SENT [] = "UnityCapture_Sent0"; CS_NAME_EVENT_SENT [sizeof(CS_NAME_EVENT_SENT ) - 2] = CSCapNumChar;
-		char CS_NAME_SHARED_DATA[] = "UnityCapture_Data0"; CS_NAME_SHARED_DATA[sizeof(CS_NAME_SHARED_DATA) - 2] = CSCapNumChar;
+		char CS_NAME_MUTEX      [] = CAPTURE_MEMORY_PREFIX "_Mutx0"; CS_NAME_MUTEX      [sizeof(CS_NAME_MUTEX      ) - 2] = CSCapNumChar;
+		char CS_NAME_EVENT_WANT [] = CAPTURE_MEMORY_PREFIX "_Want0"; CS_NAME_EVENT_WANT [sizeof(CS_NAME_EVENT_WANT ) - 2] = CSCapNumChar;
+		char CS_NAME_EVENT_SENT [] = CAPTURE_MEMORY_PREFIX "_Sent0"; CS_NAME_EVENT_SENT [sizeof(CS_NAME_EVENT_SENT ) - 2] = CSCapNumChar;
+		char CS_NAME_SHARED_DATA[] = CAPTURE_MEMORY_PREFIX "_Data0"; CS_NAME_SHARED_DATA[sizeof(CS_NAME_SHARED_DATA) - 2] = CSCapNumChar;
 
 		if (!m_hMutex)
 		{

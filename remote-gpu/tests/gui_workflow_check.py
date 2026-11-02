@@ -10,7 +10,7 @@ import rgpu.gui as gui
 from rgpu.pairing import load_identity
 
 
-def main():
+def main(resolution="360P 流畅 · 640×360"):
     with tempfile.TemporaryDirectory() as directory:
         identity = load_identity(directory)
         gui.load_preferences = lambda _: {}
@@ -26,7 +26,7 @@ def main():
         server.public_port.set(str(port))
         server.withdraw()
         local.withdraw()
-        local.resolution.set("360P 流畅 · 640×360")
+        local.resolution.set(resolution)
         local.fps.set("15")
         local.bitrate.set("1000")
         state, deadline, result = 0, time.monotonic() + 30, {}
@@ -56,6 +56,9 @@ def main():
                 elif state == 4 and local.metric_vars["return_fps"].get() not in ("—", "0.0"):
                     image = local.frames["output"]
                     if image is not None and float(image[:40, :40, 1].mean()) > 110:
+                        expected = local.video_settings()
+                        assert image.shape[:2] == (expected.height, expected.width)
+                        assert server.settings == expected
                         result = {"ok": True, "local_title": local.title(), "server_title": server.title(),
                                   "return_fps": local.metric_vars["return_fps"].get(),
                                   "actual_frame_size": [image.shape[1], image.shape[0]],
@@ -83,7 +86,8 @@ def main():
             result["loops_closed"] = not server.engine.thread.is_alive() and not local.engine.thread.is_alive()
         Path("reports").mkdir(exist_ok=True)
         from rgpu import __version__
-        Path(f"reports/gui-workflow-{__version__}.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        size = result.get("actual_frame_size", [0, 0])
+        Path(f"reports/gui-workflow-{__version__}-{size[0]}x{size[1]}.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         print(json.dumps(result, ensure_ascii=False))
         if not result.get("ok") or not result.get("loops_closed"):
             raise SystemExit(1)

@@ -18,7 +18,7 @@ from . import __version__
 from .media import list_cameras
 
 
-def input_driver_update_required():
+def driver_update_required(channel=1):
     """An EXE overlay does not replace the registered DLL in ProgramData."""
     if platform.system() != "Windows":
         return False
@@ -26,7 +26,8 @@ def input_driver_update_required():
     bundle = (Path(sys.executable).parent / "VirtualCam" if getattr(sys, "frozen", False)
               else Path(__file__).resolve().parents[2] / "app" / "VirtualCam") / "UnityCaptureFilter64.dll"
     try:
-        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, r"CLSID\{5C2CD55C-92AD-4999-8666-912BD3E70012}\InprocServer32") as key:
+        clsid = "{5C2CD55C-92AD-4999-8666-912BD3E70010}" if channel == 0 else "{5C2CD55C-92AD-4999-8666-912BD3E70012}"
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "CLSID\\" + clsid + r"\InprocServer32") as key:
             installed = Path(winreg.QueryValueEx(key, None)[0])
         if not bundle.is_file() or not installed.is_file():
             return False  # Missing drivers are diagnosed by the reader, rather than called an update.
@@ -36,6 +37,10 @@ def input_driver_update_required():
         return digest(bundle) != digest(installed)
     except OSError:
         return False
+
+
+def input_driver_update_required():
+    return driver_update_required(1)
 
 
 def run_command(arguments):
@@ -95,6 +100,7 @@ def report(probe_nvenc=False):
                 installed[name] = {"exists": False}
         data["virtual_camera_drivers"] = installed
         data["input_driver_update_required"] = input_driver_update_required()
+        data["output_driver_update_required"] = driver_update_required(0)
     return data
 
 

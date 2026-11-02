@@ -42,51 +42,54 @@ def frame_kind(frame) -> str:
     return "picture"
 
 
-def describe(device_names, opened, frame, fps, moving) -> tuple[str, str]:
+def describe(device_names, opened, frame, fps, moving, target=TARGET_NAME) -> tuple[str, str]:
     """Return (ok|warn|fail, message) for whether other programs can use Camera #2."""
-    listed = TARGET_NAME in device_names
+    listed = target in device_names
     shown = "、".join(device_names) if device_names else "（没有列出任何摄像头）"
     if not listed:
+        action = ("请在本地以管理员运行 deploy\\install-driver.ps1，然后在本地端开启虚拟摄像头。"
+                  if target == "FaceLive Camera" else
+                  "请在服务器上以管理员运行 deploy\\install-driver.ps1，然后点击「启动输入虚拟摄像头并自检」。")
         return "fail", (
-            f"没有找到 {TARGET_NAME}。当前能看到的设备：{shown}。\n"
-            "请在服务器上以管理员运行 deploy\\install-driver.ps1，然后点击「启动输入虚拟摄像头并自检」。"
+            f"没有找到 {target}。当前能看到的设备：{shown}。\n"
+            + action
         )
     if not opened:
         return "fail", (
-            f"系统已经列出 {TARGET_NAME}，但这个检查程序打不开它。\n"
+            f"系统已经列出 {target}，但这个检查程序打不开它。\n"
             f"当前设备：{shown}"
         )
     if frame is None:
-        return "fail", f"{TARGET_NAME} 能打开，但读不到任何画面。"
+        return "fail", f"{target} 能打开，但读不到任何画面。"
     height, width = frame.shape[:2]
     kind = frame_kind(frame)
     rate = "—" if fps is None else f"{fps:.0f} FPS"
     if kind == "black":
         return "warn", (
-            f"其他程序已经打开 {TARGET_NAME}（{width}×{height}，{rate}），但现在是黑画面。\n"
-            "摄像头设备可用。服务器端请确认已启动输入虚拟摄像头，并且已经收到要送进去的画面。"
+            f"检查器已经打开 {target}（{width}×{height}，{rate}），但现在是黑画面。\n"
+            "请确认桥接端已开启对应虚拟摄像头，并且已经收到要送进去的画面。"
         )
     if kind == "placeholder":
         return "warn", (
-            f"其他程序已经打开 {TARGET_NAME}（{width}×{height}），看到的是驱动自己的等待画面。\n"
-            "画面疑似驱动等待图，请确认服务器已开启输入虚拟摄像头，并在收到原画后重试。"
+            f"检查器已经打开 {target}（{width}×{height}），看到的是驱动自己的等待画面。\n"
+            "画面疑似驱动等待图，请确认桥接端已开启对应虚拟摄像头，并在收到画面后重试。"
         )
     motion = "画面在变化" if moving else "画面暂时没有变化"
     return "ok", (
-        f"成功：本检查程序通过 DirectShow 读到了 {TARGET_NAME}，{width}×{height}，{rate}，{motion}。\n"
-        "请对照原画确认内容；换脸软件的输入选择这一路，兼容性仍需在该软件中确认。"
+        f"成功：本检查程序通过 DirectShow 读到了 {target}，{width}×{height}，{rate}，{motion}。\n"
+        "请对照预览确认内容。关闭检查器后，在目标软件中选择此设备；目标软件兼容性仍需实测。"
     )
 
 
-def open_target(devices):
+def open_target(devices, target=TARGET_NAME):
     """Use the exact DirectShow device ID; indices differ between capture backends."""
     import av
     from .media import select_camera
-    device = select_camera(TARGET_NAME, devices)
+    device = select_camera(target, devices)
     return av.open(f"video={device.id}", format="dshow", options={"rtbufsize": "16M"}, timeout=(8, 5))
 
 
-def _capture_worker(connection):
+def _capture_worker(connection, target=TARGET_NAME):
     """Keep potentially blocking native driver calls outside the UI process."""
     capture = None
     try:
@@ -94,10 +97,10 @@ def _capture_worker(connection):
         devices = list_cameras()
         names = [device.name for device in devices]
         connection.send(("devices", names))
-        if TARGET_NAME not in names:
-            connection.send(("error", describe(names, False, None, None, False)[1]))
+        if target not in names:
+            connection.send(("error", describe(names, False, None, None, False, target)[1]))
             return
-        capture = open_target(devices)
+        capture = open_target(devices, target)
         connection.send(("opened", True))
         stamps = deque(maxlen=45)
         previous = None
@@ -114,13 +117,13 @@ def _capture_worker(connection):
                 motion.append(float(cv2.absdiff(previous, sample).mean()))
             previous = sample
             moving = bool(motion) and sum(motion) / len(motion) > 2
-            level, message = describe(names, True, frame, fps, moving)
+            level, message = describe(names, True, frame, fps, moving, target)
             # Only a small preview crosses the process boundary; the verdict uses the original size.
             connection.send(("frame", (_fit(frame, 800, 430), level, message)))
         raise RuntimeError("摄像头视频流已结束。")
     except Exception as ex:
         try:
-            connection.send(("error", f"读取 {TARGET_NAME} 失败：{ex}"))
+            connection.send(("error", f"读取 {target} 失败：{ex}"))
         except (OSError, EOFError):
             pass
     finally:
@@ -130,20 +133,21 @@ def _capture_worker(connection):
 
 
 class _Reader(threading.Thread):
-    def __init__(self):
+    def __init__(self, target=TARGET_NAME):
         super().__init__(daemon=True, name="Virtual camera checker")
         self.stop = threading.Event()
+        self.target = target
         self.restart = threading.Event()
         self.lock = threading.Lock()
         self.frame = None
         self.level = "info"
-        self.message = f"正在查找 {TARGET_NAME} ……"
+        self.message = f"正在查找 {self.target} ……"
         self.devices = ""
 
     def run(self):
         while not self.stop.is_set():
             self.restart.clear()
-            self._publish(None, "info", f"正在查找 {TARGET_NAME} ……", [])
+            self._publish(None, "info", f"正在查找 {self.target} ……", [])
             self._read_session()
             # Keep the failure visible until the operator explicitly retries.
             while not self.stop.is_set() and not self.restart.wait(.1):
@@ -152,7 +156,7 @@ class _Reader(threading.Thread):
     def _read_session(self):
         context = mp.get_context("spawn")
         receive, send = context.Pipe(duplex=False)
-        process = context.Process(target=_capture_worker, args=(send,), daemon=True)
+        process = context.Process(target=_capture_worker, args=(send, self.target), daemon=True)
         names = []
         last = time.monotonic()
         try:
@@ -165,7 +169,7 @@ class _Reader(threading.Thread):
                     if kind == "devices":
                         names = value
                     elif kind == "opened":
-                        self._publish(None, "info", f"已打开 {TARGET_NAME}，等待读取画面……", names)
+                        self._publish(None, "info", f"已打开 {self.target}，等待读取画面……", names)
                     elif kind == "frame":
                         frame, level, message = value
                         self._publish(frame, level, message, names)
@@ -178,7 +182,7 @@ class _Reader(threading.Thread):
                     raise TimeoutError("8 秒内没有收到画面，驱动可能无响应。可点「重新检查」。")
         except Exception as ex:
             if not self.stop.is_set() and not self.restart.is_set():
-                self._publish(None, "fail", f"无法读取 {TARGET_NAME}：{ex}", names)
+                self._publish(None, "fail", f"无法读取 {self.target}：{ex}", names)
         finally:
             receive.close()
             send.close()
@@ -200,18 +204,19 @@ class _Reader(threading.Thread):
 
 
 class CheckerWindow(tk.Tk):
-    def __init__(self, start_reader=True):
+    def __init__(self, start_reader=True, channel=1):
         super().__init__()
-        self.title("检查虚拟摄像头 · FaceLive Camera #2")
+        target = "FaceLive Camera" if channel == 0 else TARGET_NAME
+        self.title("检查虚拟摄像头 · " + target)
         self.geometry("860x700")
         self.minsize(720, 560)
         self.configure(bg="#f3f5f9")
         self.option_add("*Font", "{Microsoft YaHei UI} 10")
-        self.reader = _Reader()
+        self.reader = _Reader(target)
         self.photo = None
         wrap = tk.Frame(self, bg="#f3f5f9", padx=16, pady=14)
         wrap.pack(fill="both", expand=True)
-        tk.Label(wrap, text="模拟换脸软件，只读取服务器的输入虚拟摄像头", bg="#f3f5f9", fg="#7d8ba1").pack(anchor="w")
+        tk.Label(wrap, text=("只读取本地直播输出，不写入摄像头；检查结束后请关闭本窗口" if channel == 0 else "模拟换脸软件，只读取服务器的输入虚拟摄像头"), bg="#f3f5f9", fg="#7d8ba1").pack(anchor="w")
         self.status = tk.Label(wrap, text="", justify="left", anchor="w", bg="#ffffff", fg="#25354b",
                                padx=12, pady=10, wraplength=800)
         self.status.pack(fill="x", pady=(8, 8))
@@ -263,8 +268,8 @@ def _fit(frame, width, height):
     return cv2.resize(frame, (max(1, int(frame.shape[1] * scale)), max(1, int(frame.shape[0] * scale))))
 
 
-def launch_checker(smoke_report=None):
-    window = CheckerWindow()
+def launch_checker(smoke_report=None, channel=1):
+    window = CheckerWindow(channel=channel)
     if smoke_report:
         window.withdraw()
         from rgpu.doctor import save_report

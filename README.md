@@ -12,6 +12,8 @@
 
 ## 目录
 
+独立视频虚拟摄像头测试工具：[`remote-gpu/docs/20-独立视频摄像头测试.md`](remote-gpu/docs/20-独立视频摄像头测试.md)。添加本地视频并循环输出到 `Sony ZV-E10`；构建后运行 `dist/VideoCameraTest/VideoCameraTest.exe`。
+
 | 路径 | 内容 |
 |---|---|
 | `app/` | C# / WPF / .NET 10 主程序 |

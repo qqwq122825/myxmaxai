@@ -42,6 +42,8 @@
   <PropertyGroup>
     <TargetName Condition="'$(Platform)'=='x64'">UnityCaptureFilter64</TargetName>
     <TargetName Condition="'$(Platform)'=='Win32'">UnityCaptureFilter32</TargetName>
+    <TargetName Condition="'$(FaceLiveVideoTest)'=='true' And '$(Platform)'=='x64'">VideoTestFilter64</TargetName>
+    <TargetName Condition="'$(FaceLiveVideoTest)'=='true' And '$(Platform)'=='Win32'">VideoTestFilter32</TargetName>
     <OutDir>Build\$(Configuration)-$(TargetName)\</OutDir>
     <IntDir>$(OutDir)</IntDir>
     <GenerateManifest>false</GenerateManifest>
@@ -93,6 +95,11 @@
       <IgnoreEmbeddedIDL>true</IgnoreEmbeddedIDL>
       <GenerateWindowsMetadata>false</GenerateWindowsMetadata>
     </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(FaceLiveVideoTest)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>FACELIVE_VIDEO_TEST;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Streams.cpp" />

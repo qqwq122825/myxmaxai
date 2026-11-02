@@ -80,3 +80,16 @@ def test_disconnect_clears_the_previous_successful_frame(monkeypatch):
     assert reader.frame is None
     assert reader.level == "fail"
     assert "已结束" in reader.message
+
+
+def test_local_output_checker_selects_channel_zero_without_falling_back(monkeypatch):
+    calls = []
+    monkeypatch.setattr("av.open", lambda url, **kwargs: calls.append(url))
+    devices = [CameraDevice("FaceLive Camera", "output-id"), CameraDevice(TARGET_NAME, "input-id")]
+    open_target(devices, "FaceLive Camera")
+    assert calls == ["video=output-id"]
+    with pytest.raises(ValueError):
+        open_target(devices[1:], "FaceLive Camera")
+    frame = np.full((240, 320, 3), 100, np.uint8)
+    level, message = describe(["FaceLive Camera"], True, frame, 30, True, "FaceLive Camera")
+    assert level == "ok" and "Camera #2" not in message

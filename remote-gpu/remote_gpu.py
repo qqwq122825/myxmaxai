@@ -44,6 +44,7 @@ def parser():
     camtest.add_argument("--report", default="reports/camera-selftest.json")
     check = sub.add_parser("check-vcam", help="另开一个程序，只读取 FaceLive Camera #2，确认换脸软件能不能用")
     check.add_argument("--smoke-report", help=argparse.SUPPRESS)
+    check.add_argument("--channel", type=int, choices=(0, 1), default=1, help="0 = 本地直播输出；1 = 服务器输入（默认）")
     test = sub.add_parser("selftest", help="不使用摄像头的本机 WebRTC 回环")
     test.add_argument("--seconds", type=int, default=6)
     test.add_argument("--report", default="reports/selftest.json")
@@ -221,7 +222,8 @@ def main():
                                                       backupCount=2, encoding="utf-8")])
     if args.command == "check-vcam" or (args.command is None and _checker_launch()):
         from rgpu.vcam_probe import launch_checker
-        launch_checker(getattr(args, "smoke_report", None) if args.command == "check-vcam" else None)
+        launch_checker(getattr(args, "smoke_report", None) if args.command == "check-vcam" else None,
+                       getattr(args, "channel", 1))
         return
     if args.command == "preview-benchmark":
         from rgpu.preview_benchmark import run_preview_benchmark

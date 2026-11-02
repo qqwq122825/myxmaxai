@@ -32,7 +32,8 @@ def main():
     gui.list_windows = lambda: []
     gui.Application.prepare_server = lambda self: None
     gui.Application.detect_ip = lambda *args, **kwargs: None
-    gui.input_driver_update_required = lambda: False
+    # Reproduces a working installed DLL differing from the bundled file.
+    gui.input_driver_update_required = lambda: True
     unity.UnityCamera = FakeCamera
     probe._Reader = FakeReader
     app = gui.Application("agent")
@@ -71,7 +72,8 @@ def main():
         assert "已停止" in app.input_vcam_status.get()
         assert not app.virtual_output.enabled and app.engine.thread.is_alive()
         print(json.dumps({"ok": True, "pattern_readback": True, "real_input": True,
-                          "missing_driver_red": True, "stop_cancels_check": True}))
+                          "missing_driver_red": True, "stop_cancels_check": True,
+                          "different_driver_hash_does_not_block": True}))
     finally:
         app.close_window()
         end = time.monotonic() + 6

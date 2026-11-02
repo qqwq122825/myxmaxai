@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "upstream": "https://github.com/iperov/DeepFaceLive",
+  "license": "GPL-3.0",
+  "files": {
+    "apps/DeepFaceLive/backend/FaceLiveUnity.py": {
+      "sha256": "89c9f949977ae386db3e23077a9e7e112bf455bd252860ea179b44fe688dc214",
+      "original_sha256": null
+    },
+    "apps/DeepFaceLive/backend/FaceLiveVirtualCamera.py": {
+      "sha256": "0e6b177184b2e37ff8ab9bf0767aca872c1740fb427b072dd1ad71557c5ee4b8",
+      "original_sha256": null
+    },
+    "apps/DeepFaceLive/backend/StreamOutput.py": {
+      "sha256": "e95483ebbcd2cba571d9a235bbc3b0a6971163716d80e3ee938a033463502dfd",
+      "original_sha256": "38271189cafdda1ef2b8ac639142eb9c1126d0bab311500bb2f8a50d4d8eb527"
+    },
+    "apps/DeepFaceLive/ui/QStreamOutput.py": {
+      "sha256": "efdc620cf5f4e31fa9949cc5b8ec2718d3a99ca364639d7a8b6c757a5ef1f7bf",
+      "original_sha256": "6207538bbcae2733ebe458154bb2aaa7b479b23341fd6de66b8a8d09972cdaf0"
+    }
+  }
+}

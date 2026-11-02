@@ -77,6 +77,7 @@ class VirtualOutput:
     def __init__(self, settings, channel, status=lambda _: None):
         self.settings, self.channel, self.status = settings, channel, status
         self.enabled = False
+        self.mirror = False
         self.written = 0
         self._latest = None
         self._diagnostic = None
@@ -109,6 +110,8 @@ class VirtualOutput:
     def _run(self):
         camera = None
         black = np.zeros((self.settings.height, self.settings.width, 3), np.uint8)
+        period = 1 / self.settings.fps
+        next_tick = time.monotonic()
         try:
             while not self.exit.is_set():
                 tick = time.monotonic()
@@ -126,15 +129,25 @@ class VirtualOutput:
                 if camera:
                     with self._gate:
                         image = self._latest if tick - self._last <= 1 else None
+                        real_input = image is not None
                         if image is None and tick < self._diagnostic_until:
                             image = self._diagnostic
                     try:
                         image = black if image is None else fit_bgr(image, self.settings.width, self.settings.height)
+                        # Diagnostics retain their known orientation for the readback check.
+                        if self.mirror and real_input:
+                            image = np.ascontiguousarray(image[:, ::-1])
                         self.written += bool(camera.send(image))
                     except Exception as ex:
                         self.enabled = False
                         self.status(f"虚拟摄像头输出失败：{ex}")
-                self.exit.wait(max(0.001, 1 / self.settings.fps - (time.monotonic() - tick)))
+                # Keep a stable cadence instead of accumulating each Windows wait's
+                # overshoot. A stalled consumer must not trigger a burst of old frames.
+                next_tick += period
+                now = time.monotonic()
+                if next_tick <= now:
+                    next_tick = now
+                self.exit.wait(max(.001, next_tick - now))
         finally:
             if camera:
                 with contextlib.suppress(Exception):

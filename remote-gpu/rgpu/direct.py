@@ -15,7 +15,7 @@ from aiortc import VideoStreamTrack
 from aiortc.mediastreams import MediaStreamError
 
 from . import __version__
-from .config import VideoSettings
+from .config import VideoSettings, video_limits, check_remote_video_size
 from .direct_codec import H264Decoder, H264Encoder, MAX_MESSAGE
 from .media import CameraTrack, FrameSink, LatestQueue, LatestTrack, PatternTrack
 from .pairing import Pairing
@@ -157,7 +157,8 @@ class DirectAgent:
 
     async def health(self, request):
         return web.json_response({"version": __version__, "protocol": "direct-1", "busy": self.busy,
-                                  "mode": self.mode, "transport": "TLS/TCP", "encoder": "libx264 (CPU)"})
+                                  "mode": self.mode, "transport": "TLS/TCP", "encoder": "libx264 (CPU)",
+                                  "video_limits": video_limits()})
 
     async def stream(self, request):
         async with self.lock:
@@ -289,6 +290,7 @@ async def connect_direct(pairing_code, device, settings, stop, sink_target="unit
                 health = await response.json()
                 if health.get("protocol") != "direct-1":
                     raise ValueError("两端直连协议不兼容。")
+                check_remote_video_size(health, settings)
                 if health.get("busy"):
                     raise ConnectionError("远程端已有连接，请先停止旧连接。")
             async with http.ws_connect(pairing.endpoint + "/stream", ssl=fingerprint, heartbeat=5,
