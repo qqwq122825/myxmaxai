@@ -81,6 +81,11 @@
 
 - (void)startMicrophone:(void (^)(NSData *))handler completion:(void (^)(BOOL))completion {
     dispatch_async(self.sessionQueue, ^{
+        if (self.audioOutput) {                    // already running (quick off → on): keep it, new handler
+            dispatch_sync(self.audioQueue, ^{ self.onPCM = handler; });
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(YES); });
+            return;
+        }
         AVCaptureDevice *device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
         AVCaptureDeviceInput *input = device ? [AVCaptureDeviceInput deviceInputWithDevice:device error:nil] : nil;
         AVCaptureAudioDataOutput *output = [AVCaptureAudioDataOutput new];

@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 if (Test-Path -LiteralPath $Python -PathType Leaf) { $Python = (Resolve-Path -LiteralPath $Python).Path }
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent $projectRoot
-$output = Join-Path $projectRoot 'dist\FaceLiveLan-1.0.3'
+$output = Join-Path $projectRoot 'dist\FaceLiveLan-1.0.4'
 $virtualCam = Join-Path $repoRoot 'app\VirtualCam'
 $driverRoot = Join-Path $repoRoot 'vcam\Build\LanCameraDriver'
 New-Item -ItemType Directory -Path $driverRoot -Force | Out-Null

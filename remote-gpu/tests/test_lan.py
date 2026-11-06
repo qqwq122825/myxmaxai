@@ -51,3 +51,54 @@ def test_rotation_invalidates_old_key_but_keeps_certificate(tmp_path):
 async def test_phone_protocol_tls_decode_auth_busy_and_reconnect(tmp_path, size):
     result = await exercise(tmp_path, *size)
     assert result["ok"] and result["input_frames"] == 6
+
+
+async def test_reconnecting_phone_replaces_silent_connection_but_not_live_one(tmp_path):
+    import asyncio
+    from dataclasses import asdict
+
+    import aiohttp
+    from aiohttp import web
+
+    from rgpu.config import VideoSettings
+    from rgpu.lan import LanReceiver
+
+    identity = load_identity(tmp_path)
+    disconnects = []
+    agent = LanReceiver(identity, on_disconnect=lambda: disconnects.append(True))
+    agent.stale_after = 0.5
+    runner = web.AppRunner(agent.application(), access_log=None, shutdown_timeout=3)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=identity.ssl_context())
+    await site.start()
+    endpoint = f"https://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+    pin = aiohttp.Fingerprint(bytes.fromhex(identity.fingerprint))
+    hello = {"type": "start", "protocol": "direct-1", "role": "source",
+             "video": asdict(VideoSettings(720, 1280, 30, 6000))}
+    try:
+        async with aiohttp.ClientSession(headers={"Authorization": "Bearer " + identity.key}) as http:
+            old = await http.ws_connect(endpoint + "/stream", ssl=pin, autoping=False, heartbeat=None)
+            await old.send_json(hello)
+            assert (await old.receive_json(timeout=3))["type"] == "ready"
+
+            # Live (just spoke): a second phone is still refused and health reports busy.
+            async with http.get(endpoint + "/health", ssl=pin) as response:
+                assert (await response.json())["busy"]
+            async with http.ws_connect(endpoint + "/stream", ssl=pin) as second:
+                await second.send_json(hello)
+                assert (await second.receive_json(timeout=3))["type"] == "error"
+
+            # The old phone goes silent (Wi-Fi dropped without a close): health stops reporting busy
+            # and the reconnecting phone takes over within a moment instead of waiting 10-20 s.
+            await asyncio.sleep(0.8)
+            async with http.get(endpoint + "/health", ssl=pin) as response:
+                assert not (await response.json())["busy"]
+            async with http.ws_connect(endpoint + "/stream", ssl=pin) as new:
+                await new.send_json(hello)
+                assert (await new.receive_json(timeout=8))["type"] == "ready"
+                assert agent.busy and agent.ws is not None and len(disconnects) == 1
+                await new.send_json({"type": "ping", "time": 5})
+                assert await new.receive_json(timeout=3) == {"type": "pong", "time": 5}
+            await old.close()
+    finally:
+        await runner.cleanup()

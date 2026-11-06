@@ -9,7 +9,7 @@
 #import <Security/Security.h>
 
 NSErrorDomain const RGConnectionErrorDomain = @"AIMoYan.Connection";
-static const NSInteger RGDefaultPort = 8766;
+static const NSInteger RGDefaultPort = 8766;       // remote server; the PC LAN receiver uses 8767
 static const NSInteger RGMaxInFlight = 3;          // queued video messages before we start dropping camera frames
 static const NSInteger RGMaxMessage = 4 * 1024 * 1024;
 
@@ -43,6 +43,11 @@ static NSError *RGUnreachable(NSString *message) {
 }
 
 + (nullable instancetype)infoWithAddress:(NSString *)address key:(NSString *)key error:(NSError **)error {
+    return [self infoWithAddress:address key:key defaultPort:RGDefaultPort error:error];
+}
+
++ (nullable instancetype)infoWithAddress:(NSString *)address key:(NSString *)key defaultPort:(NSInteger)defaultPort
+                                   error:(NSError **)error {
     RGServerInfo *info = [RGServerInfo new];
 
     // ---- Address ----
@@ -52,7 +57,7 @@ static NSError *RGUnreachable(NSString *message) {
     }
     NSRange slash = [a rangeOfString:@"/"];
     if (slash.location != NSNotFound) a = [a substringToIndex:slash.location];
-    NSString *host = a; NSInteger port = RGDefaultPort;
+    NSString *host = a; NSInteger port = defaultPort;
     if ([a hasPrefix:@"["]) {                                   // [ipv6]:port
         NSRange close = [a rangeOfString:@"]"];
         if (close.location == NSNotFound) { if (error) *error = RGError(@"服务器地址格式不正确。"); return nil; }

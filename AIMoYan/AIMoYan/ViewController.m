@@ -41,6 +41,8 @@ static NSString *const kKeychainService = @"AIMoYan.server";
 static NSString *const kAddressDefaultsKey = @"AIMoYan.serverAddress";
 static NSString *const kLANAddressDefaultsKey = @"AIMoYan.lanAddress";
 static NSString *const kModeDefaultsKey = @"AIMoYan.linkMode";
+static NSString *const kMicDefaultsKey = @"AIMoYan.micEnabled";
+static const NSInteger kLANDefaultPort = 8767;      // PC LAN receiver (remote server: 8766)
 static NSString *const kQualityDefaultsKey = @"AIMoYan.quality";
 static NSString *const kPortraitDefaultsKey = @"AIMoYan.portrait";
 
@@ -100,6 +102,7 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UILabel *statsLabel;
 @property (nonatomic, strong) UIButton *switchButton;
+@property (nonatomic, strong) UIButton *micButton;               // LAN only: send the phone microphone to the PC
 @property (nonatomic, strong) UIButton *qualityButton;
 @property (nonatomic, strong) UIButton *orientationButton;
 @property (nonatomic, strong) UIView *panel;
@@ -115,6 +118,8 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
 // State
 @property (nonatomic) RGState state;
 @property (nonatomic) RGLinkMode linkMode;
+@property (nonatomic) BOOL micEnabled;      // user's choice (remembered)
+@property (nonatomic) BOOL micWanted;       // microphone should be capturing right now
 @property (nonatomic, strong) NSMutableArray<RGServerInfo *> *pendingServers;   // other addresses still to try
 @property (nonatomic, strong, nullable) nw_path_monitor_t pathMonitor;
 @property (atomic) BOOL onWiFi;
@@ -141,6 +146,7 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     self.quality = [defaults integerForKey:kQualityDefaultsKey] == RGQuality1080p ? RGQuality1080p : RGQuality720p;
     self.portrait = [defaults objectForKey:kPortraitDefaultsKey] ? [defaults boolForKey:kPortraitDefaultsKey] : YES;
     self.linkMode = [defaults integerForKey:kModeDefaultsKey] == RGLinkModeLAN ? RGLinkModeLAN : RGLinkModeRemote;
+    self.micEnabled = [defaults objectForKey:kMicDefaultsKey] ? [defaults boolForKey:kMicDefaultsKey] : YES;
     self.pendingServers = [NSMutableArray array];
     self.onWiFi = YES;
 
@@ -181,13 +187,14 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
 
 - (void)loadFieldsForMode {
     self.modeControl.selectedSegmentIndex = self.linkMode;
+    [self refreshMicButton];
     self.addressField.text = [NSUserDefaults.standardUserDefaults stringForKey:[self addressDefaultsKeyForMode:self.linkMode]];
     self.keyField.text = RGKeychainLoad(self.linkMode);
     BOOL lan = self.linkMode == RGLinkModeLAN;
     self.addressCaption.text = lan ? @"电脑地址（扫码自动填写）" : @"服务器地址";
     self.keyCaption.text = lan ? @"连接 Key（扫码自动填写）" : @"连接 Key";
     self.addressField.attributedPlaceholder = [[NSAttributedString alloc]
-        initWithString:lan ? @"例如 192.168.1.23:8766" : @"服务器地址，例如 1.2.3.4:8766"
+        initWithString:lan ? @"例如 192.168.1.23:8767" : @"服务器地址，例如 1.2.3.4:8766"
             attributes:@{NSForegroundColorAttributeName: RG_MUTED}];
     self.hintLabel.text = lan ? @"手机和电脑连同一个 Wi‑Fi · 电脑打开接收端，点地址栏右边的扫码按钮"
                               : @"轻点对焦后上下滑调亮度 · 长按锁定对焦和亮度 · 双击切换前后摄像头";
@@ -335,7 +342,9 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     NSMutableArray<RGServerInfo *> *servers = [NSMutableArray array];
     for (NSString *address in addresses) {
         NSError *error = nil;
-        RGServerInfo *server = [RGServerInfo infoWithAddress:address key:self.keyField.text ?: @"" error:&error];
+        RGServerInfo *server = lan ? [RGServerInfo infoWithAddress:address key:self.keyField.text ?: @""
+                                                         defaultPort:kLANDefaultPort error:&error]
+                                   : [RGServerInfo infoWithAddress:address key:self.keyField.text ?: @"" error:&error];
         if (!server) { [self showError:error.localizedDescription]; return; }
         [servers addObject:server];
     }
@@ -383,6 +392,7 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     self.connection = nil;
     connection.delegate = nil;
     [connection disconnect];
+    self.micWanted = NO;
     [self.camera stopMicrophone];
     [self.encoder invalidate];
     self.encoder = nil;
@@ -414,24 +424,69 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     [self.pendingServers removeAllObjects];
     [self setStatus:self.linkMode == RGLinkModeLAN ? @"局域网推流中 · 电脑接收端已连接" : @"推流中 · 换脸结果在电脑端接收"
               color:RG_OK];
-    if (connection.microphoneSupported) {
-        __weak typeof(self) weakSelf = self;
-        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                __strong typeof(weakSelf) self = weakSelf;
-                if (!self || self.connection != connection) return;
-                if (!granted) {
-                    [self showToast:@"麦克风未授权，可在 iPhone 设置中开启"];
-                    return;
-                }
-                [self.camera startMicrophone:^(NSData *pcm) {
-                    [weakConnection sendMicrophonePCM:pcm];
-                } completion:^(BOOL started) {
-                    if (self.connection == connection && !started) [self showToast:@"手机麦克风启动失败"];
-                }];
-            });
-        }];
+    [self updateMicrophone];
+}
+
+#pragma mark Microphone (LAN: the phone mic is played on the PC)
+
+- (void)micTapped {
+    self.micEnabled = !self.micEnabled;
+    [NSUserDefaults.standardUserDefaults setBool:self.micEnabled forKey:kMicDefaultsKey];
+    [self refreshMicButton];
+    if (self.state == RGStateLive && !self.connection.microphoneSupported) {
+        [self showToast:@"电脑接收端版本不支持手机麦克风"];
+        return;
     }
+    [self showToast:self.micEnabled ? @"手机麦克风：开" : @"手机麦克风：关"];
+    [self updateMicrophone];
+}
+
+- (void)refreshMicButton {
+    self.micButton.hidden = self.linkMode != RGLinkModeLAN;
+    UIButtonConfiguration *config = self.micButton.configuration;
+    config.image = [UIImage systemImageNamed:self.micEnabled ? @"mic.fill" : @"mic.slash.fill"
+        withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold]];
+    config.baseForegroundColor = self.micEnabled ? RG_TEXT : RG_LIVE;
+    self.micButton.configuration = config;
+    [self setLabel:self.micEnabled ? @"麦克风" : @"已静音" onButton:self.micButton];
+    self.micButton.accessibilityLabel = self.micEnabled ? @"关闭手机麦克风" : @"打开手机麦克风";
+}
+
+/// Starts / stops capture so it matches: streaming + receiver supports it + switched on.
+/// Off really stops the microphone (the orange indicator goes away), not just muting the upload.
+- (void)updateMicrophone {
+    RGConnection *connection = self.connection;
+    BOOL want = self.state == RGStateLive && connection.microphoneSupported && self.micEnabled;
+    if (want == self.micWanted) return;
+    self.micWanted = want;
+    if (!want) { [self.camera stopMicrophone]; return; }
+
+    __weak typeof(self) weakSelf = self;
+    __weak RGConnection *weakConnection = connection;
+    [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) self = weakSelf;
+            if (!self || !self.micWanted || self.connection != connection) return;
+            if (!granted) {
+                self.micWanted = NO;
+                self.micEnabled = NO;
+                [self refreshMicButton];
+                [self showToast:@"麦克风未授权，可在 设置 → AI魔颜 中开启"];
+                return;
+            }
+            [self.camera startMicrophone:^(NSData *pcm) {
+                [weakConnection sendMicrophonePCM:pcm];
+            } completion:^(BOOL started) {
+                __strong typeof(weakSelf) self = weakSelf;
+                if (!self) return;
+                // Switched off / disconnected while it was starting: stop it again. (If a new connection
+                // wants the mic, its own start already replaced the handler — leave it running.)
+                if (!self.micWanted) { [self.camera stopMicrophone]; return; }
+                if (self.connection != connection) return;
+                if (!started) { self.micWanted = NO; [self showToast:@"手机麦克风启动失败"]; }
+            }];
+        });
+    }];
 }
 
 - (void)connection:(RGConnection *)connection returnActiveChanged:(BOOL)active {
@@ -881,11 +936,13 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     // Side buttons
     self.switchButton = [self roundButtonWithSymbol:@"arrow.triangle.2.circlepath.camera"];
     [self.switchButton addTarget:self action:@selector(switchCameraTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.micButton = [self roundButtonWithSymbol:@"mic.fill"];
+    [self.micButton addTarget:self action:@selector(micTapped) forControlEvents:UIControlEventTouchUpInside];
     self.qualityButton = [self roundButtonWithSymbol:@"sparkles.tv"];
     self.qualityButton.showsMenuAsPrimaryAction = YES;
     self.orientationButton = [self roundButtonWithSymbol:@"rotate.right"];
     self.orientationButton.showsMenuAsPrimaryAction = YES;
-    UIStackView *side = [[UIStackView alloc] initWithArrangedSubviews:@[self.switchButton, self.qualityButton, self.orientationButton]];
+    UIStackView *side = [[UIStackView alloc] initWithArrangedSubviews:@[self.micButton, self.switchButton, self.qualityButton, self.orientationButton]];
     side.axis = UILayoutConstraintAxisVertical;
     side.spacing = 12;
     side.translatesAutoresizingMaskIntoConstraints = NO;

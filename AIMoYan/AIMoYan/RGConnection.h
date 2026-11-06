@@ -19,6 +19,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy, readonly) NSData *fingerprint;     // SHA-256 of the server certificate (32 bytes)
 /// address: "1.2.3.4", "1.2.3.4:8766", "https://host:port", "[::1]:8766". key: "RGK1.xxxx".
 + (nullable instancetype)infoWithAddress:(NSString *)address key:(NSString *)key error:(NSError **)error;
+/// Same, with the port used when the address has none (remote server 8766, PC LAN receiver 8767).
++ (nullable instancetype)infoWithAddress:(NSString *)address key:(NSString *)key defaultPort:(NSInteger)defaultPort
+                                   error:(NSError **)error;
 @end
 
 /// Negotiated video settings (must match the encoder output exactly).

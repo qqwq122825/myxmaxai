@@ -28,7 +28,7 @@ from .media import FrameSink
 from .lan_audio import AUDIO_MAGIC, MAX_PCM_BYTES
 from .pairing import ConnectionKey, load_identity
 
-LAN_VERSION = "1.0.3"
+LAN_VERSION = "1.0.4"
 DEFAULT_PORT = 8767  # Does not take the existing remote bridge's default port.
 NETWORKS = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"))
 
@@ -138,10 +138,32 @@ class LanReceiver(DirectAgent):
         super().__init__(identity, preview=preview, status=status)
         self.statistics, self.on_settings, self.on_disconnect = statistics, on_settings, on_disconnect
         self.on_audio = on_audio
+        # A live phone sends ~30 frames and a ping every second. A connection silent for longer than this
+        # is a phone that dropped off Wi-Fi without closing; the next phone with the Key may replace it.
+        self.stale_after = 3.0
+        self.last_activity = 0.0
+
+    def connection_stale(self):
+        return self.busy and time.monotonic() - self.last_activity > self.stale_after
+
+    def live_busy(self):
+        return self.busy and not self.connection_stale()
 
     async def health(self, request):
         return web.json_response({"version": LAN_VERSION, "protocol": "direct-1",
-            "features": ["lan-receiver", "lan-mic-pcm"], "busy": self.busy, "video_limits": video_limits()})
+            "features": ["lan-receiver", "lan-mic-pcm"], "busy": self.live_busy(), "video_limits": video_limits()})
+
+    async def release_stale_connection(self):
+        """Close a silent previous connection so a reconnecting phone is not refused for 10–20 s."""
+        old = self.ws if self.connection_stale() else None
+        if old is None:
+            return
+        self.status("旧连接已无响应，正在切换到新的手机连接…")
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(old.close(code=1001, message=b"Replaced by a new connection"), 2)
+        deadline = time.monotonic() + 5
+        while self.busy and self.ws is old and time.monotonic() < deadline:
+            await asyncio.sleep(.05)
 
     async def stream(self, request):
         ws = web.WebSocketResponse(heartbeat=5, receive_timeout=20,
@@ -156,10 +178,12 @@ class LanReceiver(DirectAgent):
             if hello.get("type") != "start" or hello.get("protocol") != "direct-1" or hello.get("role") != "source":
                 raise ValueError("此接收端只接受手机局域网推流（direct-1 / source）。")
             settings = VideoSettings(**hello["video"])
+            await self.release_stale_connection()
             async with self.lock:
                 if self.busy:
                     raise ValueError("已经连着另一台手机，请先断开旧连接。")
                 self.busy, claimed, self.ws = True, True, ws
+                self.last_activity = time.monotonic()
             self.on_settings(settings)
             sink = FrameSink(settings, "none", self.preview)
             await sink.wait_ready()
@@ -191,6 +215,7 @@ class LanReceiver(DirectAgent):
             async def receive():
                 nonlocal received_frames, received_bytes, last_frame
                 async for message in ws:
+                    self.last_activity = time.monotonic()
                     if message.type == aiohttp.WSMsgType.BINARY:
                         if message.data.startswith(AUDIO_MAGIC):
                             pcm = message.data[len(AUDIO_MAGIC):]
@@ -226,7 +251,7 @@ class LanReceiver(DirectAgent):
                 await asyncio.gather(reporter, return_exceptions=True)
             if sink:
                 await sink.close()
-            if claimed:
+            if claimed and self.ws is ws:
                 self.busy, self.ws = False, None
                 self.on_disconnect()
                 self.statistics({"fps": 0, "mbps": 0, "disconnected": True})
