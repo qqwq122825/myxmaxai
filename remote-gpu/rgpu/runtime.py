@@ -74,8 +74,9 @@ def pairing_from_fields(address, key, fingerprint=""):
 
 class VirtualOutput:
     """A virtual camera has its own lifetime, separate from any network connection."""
-    def __init__(self, settings, channel, status=lambda _: None):
+    def __init__(self, settings, channel, status=lambda _: None, camera_factory=None):
         self.settings, self.channel, self.status = settings, channel, status
+        self.camera_factory = camera_factory
         self.enabled = False
         self.mirror = False
         self.written = 0
@@ -122,7 +123,8 @@ class VirtualOutput:
                 if self.enabled and camera is None:
                     try:
                         from .unity import UnityCamera
-                        camera = UnityCamera(self.settings.width, self.settings.height, self.channel)
+                        factory = self.camera_factory or UnityCamera
+                        camera = factory(self.settings.width, self.settings.height, self.channel)
                     except Exception as ex:
                         self.enabled = False
                         self.status(f"虚拟摄像头未开启：{ex}")

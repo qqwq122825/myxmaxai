@@ -34,7 +34,10 @@
 #include <math.h>
 #pragma comment(lib, "advapi32.lib")
 
-#ifdef FACELIVE_VIDEO_TEST
+#ifdef FACELIVE_LAN_CAMERA
+#define CaptureSourceName L"xxx3"
+#define CAPTURE_SETTINGS_KEY L"Software\\FaceLive\\LanCamera"
+#elif defined(FACELIVE_VIDEO_TEST)
 #define CaptureSourceName L"Sony ZV-E10"
 #define CAPTURE_SETTINGS_KEY L"Software\\FaceLive\\VideoTest"
 #else
@@ -43,7 +46,13 @@
 #endif
 
 //Use separate GUIDs for 64bit and 32bit so both can be installed at the same time
-#if defined(FACELIVE_VIDEO_TEST) && defined(_WIN64)
+#if defined(FACELIVE_LAN_CAMERA) && defined(_WIN64)
+DEFINE_GUID(CLSID_UnityCaptureService,    0x7be4e5c1, 0xbef4, 0x48e5, 0xa8, 0xae, 0x8e, 0x56, 0xc8, 0x10, 0x00, 0x10);
+DEFINE_GUID(CLSID_UnityCaptureProperties, 0x7be4e5c1, 0xbef4, 0x48e5, 0xa8, 0xae, 0x8e, 0x56, 0xc8, 0x10, 0x00, 0x11);
+#elif defined(FACELIVE_LAN_CAMERA)
+DEFINE_GUID(CLSID_UnityCaptureService,    0x7be4e5c1, 0xbef4, 0x48e5, 0xa8, 0xae, 0x8e, 0x56, 0xc8, 0x10, 0x00, 0x20);
+DEFINE_GUID(CLSID_UnityCaptureProperties, 0x7be4e5c1, 0xbef4, 0x48e5, 0xa8, 0xae, 0x8e, 0x56, 0xc8, 0x10, 0x00, 0x21);
+#elif defined(FACELIVE_VIDEO_TEST) && defined(_WIN64)
 DEFINE_GUID(CLSID_UnityCaptureService,    0x2c64a7e9, 0x8531, 0x4f79, 0x9c, 0xc1, 0xa3, 0x22, 0x67, 0x08, 0x00, 0x10);
 DEFINE_GUID(CLSID_UnityCaptureProperties, 0x2c64a7e9, 0x8531, 0x4f79, 0x9c, 0xc1, 0xa3, 0x22, 0x67, 0x08, 0x00, 0x11);
 #elif defined(FACELIVE_VIDEO_TEST)

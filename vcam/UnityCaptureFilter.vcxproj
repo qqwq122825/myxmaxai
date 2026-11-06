@@ -44,6 +44,8 @@
     <TargetName Condition="'$(Platform)'=='Win32'">UnityCaptureFilter32</TargetName>
     <TargetName Condition="'$(FaceLiveVideoTest)'=='true' And '$(Platform)'=='x64'">VideoTestFilter64</TargetName>
     <TargetName Condition="'$(FaceLiveVideoTest)'=='true' And '$(Platform)'=='Win32'">VideoTestFilter32</TargetName>
+    <TargetName Condition="'$(FaceLiveLan)'=='true' And '$(Platform)'=='x64'">LanCaptureFilter64</TargetName>
+    <TargetName Condition="'$(FaceLiveLan)'=='true' And '$(Platform)'=='Win32'">LanCaptureFilter32</TargetName>
     <OutDir>Build\$(Configuration)-$(TargetName)\</OutDir>
     <IntDir>$(OutDir)</IntDir>
     <GenerateManifest>false</GenerateManifest>
@@ -99,6 +101,11 @@
   <ItemDefinitionGroup Condition="'$(FaceLiveVideoTest)'=='true'">
     <ClCompile>
       <PreprocessorDefinitions>FACELIVE_VIDEO_TEST;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(FaceLiveLan)'=='true'">
+    <ClCompile>
+      <PreprocessorDefinitions>FACELIVE_LAN_CAMERA;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>

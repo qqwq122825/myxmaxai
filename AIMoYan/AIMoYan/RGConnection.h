@@ -54,6 +54,7 @@ typedef NS_ENUM(NSInteger, RGConnectionErrorCode) {
 @property (nonatomic, readonly) BOOL ready;
 /// LAN mode (PC receiver on the same Wi‑Fi): shorter connect timeout and LAN-specific error messages.
 @property (nonatomic) BOOL localNetwork;
+@property (atomic, readonly) BOOL microphoneSupported;
 @property (nonatomic, readonly) BOOL returnActive;
 /// Round-trip time in ms, or -1 when not measured yet.
 @property (atomic, readonly) double rttMs;
@@ -66,6 +67,7 @@ typedef NS_ENUM(NSInteger, RGConnectionErrorCode) {
 - (BOOL)canSendVideo;
 - (void)noteDroppedFrame;
 - (void)sendVideoMessage:(NSData *)message;
+- (void)sendMicrophonePCM:(NSData *)pcm;
 @end
 
 NS_ASSUME_NONNULL_END

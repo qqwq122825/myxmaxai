@@ -6,6 +6,8 @@ The FaceLive DirectShow driver derives from Unity Capture by Bernhard Schelling 
 
 Transport uses aiortc (BSD-3-Clause), PyAV (BSD), aiohttp (Apache-2.0), NumPy (BSD) and OpenCV (Apache-2.0), plus their dependencies. Actual dependency metadata and installed license files are copied to `licenses/` during packaging. Tk/Tcl and Python notices are included in the packaged runtime.
 
+The independent LAN receiver uses [python-qrcode](https://github.com/lincolnloop/python-qrcode) (BSD) to generate phone pairing codes. Its installed license is included in `licenses/`.
+
 Selected-window capture uses [windows-capture](https://github.com/NiiightmareXD/windows-capture) (MIT), through Windows Graphics Capture, or the Windows PrintWindow API for the compatibility option. Its native extension runs in a child process. No desktop fallback is performed.
 
 PyAV wheels contain FFmpeg libraries and this prototype uses libx264. The wheel's FFmpeg component configuration and license notices must be considered alongside PyAV's own license. Upstream source and build resources:

@@ -4,14 +4,21 @@
 //
 
 #import "RGCamera.h"
+#include <math.h>
 
-@interface RGCamera () <AVCaptureVideoDataOutputSampleBufferDelegate>
+@interface RGCamera () <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate>
 @property (nonatomic, strong, readwrite) AVCaptureSession *session;
 @property (nonatomic, readwrite) AVCaptureDevicePosition position;
 @property (nonatomic, readwrite) RGQuality quality;
 @property (nonatomic, readwrite) BOOL portrait;
 @property (nonatomic, strong) dispatch_queue_t sessionQueue;
 @property (nonatomic, strong) dispatch_queue_t videoQueue;
+@property (nonatomic, strong) dispatch_queue_t audioQueue;
+@property (nonatomic, strong, nullable) AVCaptureDeviceInput *microphone;
+@property (nonatomic, strong, nullable) AVCaptureAudioDataOutput *audioOutput;
+// Used only on audioQueue.
+@property (nonatomic, copy, nullable) void (^onPCM)(NSData *);
+@property (nonatomic, strong, nullable) AVAudioConverter *pcmConverter;
 @property (nonatomic, strong, nullable) AVCaptureDeviceInput *input;
 @property (nonatomic, strong) AVCaptureVideoDataOutput *output;
 @property (nonatomic, strong, nullable) id rotationCoordinator;   // AVCaptureDeviceRotationCoordinator (iOS 17+)
@@ -30,6 +37,7 @@
         _session = [AVCaptureSession new];
         _sessionQueue = dispatch_queue_create("AIMoYan.camera.session", DISPATCH_QUEUE_SERIAL);
         _videoQueue = dispatch_queue_create("AIMoYan.camera.video", DISPATCH_QUEUE_SERIAL);
+        _audioQueue = dispatch_queue_create("AIMoYan.camera.audio", DISPATCH_QUEUE_SERIAL);
         _output = [AVCaptureVideoDataOutput new];
         _output.alwaysDiscardsLateVideoFrames = YES;
         _output.videoSettings = @{(id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)};
@@ -69,6 +77,48 @@
 
 - (void)stop {
     dispatch_async(self.sessionQueue, ^{ if (self.session.isRunning) [self.session stopRunning]; });
+}
+
+- (void)startMicrophone:(void (^)(NSData *))handler completion:(void (^)(BOOL))completion {
+    dispatch_async(self.sessionQueue, ^{
+        AVCaptureDevice *device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
+        AVCaptureDeviceInput *input = device ? [AVCaptureDeviceInput deviceInputWithDevice:device error:nil] : nil;
+        AVCaptureAudioDataOutput *output = [AVCaptureAudioDataOutput new];
+        BOOL started = NO;
+        [self.session beginConfiguration];
+        if (!self.audioOutput && input && [self.session canAddInput:input]) {
+            [self.session addInput:input];
+            if ([self.session canAddOutput:output]) {
+                dispatch_sync(self.audioQueue, ^{ self.onPCM = handler; });
+                [output setSampleBufferDelegate:self queue:self.audioQueue];
+                [self.session addOutput:output];
+                self.microphone = input;
+                self.audioOutput = output;
+                started = YES;
+            } else {
+                [self.session removeInput:input];
+            }
+        }
+        [self.session commitConfiguration];
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(started); });
+    });
+}
+
+- (void)stopMicrophone {
+    dispatch_async(self.sessionQueue, ^{
+        if (!self.audioOutput) return;
+        [self.audioOutput setSampleBufferDelegate:nil queue:NULL];
+        dispatch_sync(self.audioQueue, ^{
+            self.onPCM = nil;
+            self.pcmConverter = nil;
+        });
+        [self.session beginConfiguration];
+        [self.session removeOutput:self.audioOutput];
+        [self.session removeInput:self.microphone];
+        self.audioOutput = nil;
+        self.microphone = nil;
+        [self.session commitConfiguration];
+    });
 }
 
 - (void)resume {
@@ -269,9 +319,55 @@
 
 #pragma mark Frames
 
+- (void)sendMicrophoneSample:(CMSampleBufferRef)sample {
+    void (^handler)(NSData *) = self.onPCM;
+    if (!handler) return;
+    CMFormatDescriptionRef description = CMSampleBufferGetFormatDescription(sample);
+    if (!description) return;
+    const AudioStreamBasicDescription *stream = CMAudioFormatDescriptionGetStreamBasicDescription(description);
+    if (!stream || stream->mFormatID != kAudioFormatLinearPCM || stream->mSampleRate <= 0) return;
+    AVAudioFormat *inputFormat = [[AVAudioFormat alloc] initWithStreamDescription:stream];
+    CMItemCount count = CMSampleBufferGetNumSamples(sample);
+    if (!inputFormat || count <= 0 || count > 16384) return;
+    AVAudioPCMBuffer *input = [[AVAudioPCMBuffer alloc] initWithPCMFormat:inputFormat frameCapacity:(AVAudioFrameCount)count];
+    if (!input) return;
+    input.frameLength = (AVAudioFrameCount)count;
+    if (CMSampleBufferCopyPCMDataIntoAudioBufferList(sample, 0, (int32_t)count, input.mutableAudioBufferList) != noErr) return;
+
+    if (!self.pcmConverter || ![self.pcmConverter.inputFormat isEqual:inputFormat]) {
+        AVAudioFormat *format = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatInt16
+                                                               sampleRate:48000 channels:1 interleaved:YES];
+        self.pcmConverter = [[AVAudioConverter alloc] initFromFormat:inputFormat toFormat:format];
+    }
+    AVAudioConverter *converter = self.pcmConverter;
+    if (!converter) return;
+    AVAudioFrameCount capacity = (AVAudioFrameCount)ceil(count * 48000.0 / stream->mSampleRate) + 64;
+    AVAudioPCMBuffer *output = [[AVAudioPCMBuffer alloc] initWithPCMFormat:converter.outputFormat frameCapacity:capacity];
+    if (!output) return;
+    __block BOOL supplied = NO;
+    AVAudioConverterOutputStatus status = [converter convertToBuffer:output error:nil
+        withInputFromBlock:^AVAudioBuffer *(AVAudioPacketCount requested, AVAudioConverterInputStatus *outStatus) {
+        *outStatus = supplied ? AVAudioConverterInputStatus_NoDataNow : AVAudioConverterInputStatus_HaveData;
+        if (supplied) return nil;
+        supplied = YES;
+        return input;
+    }];
+    if (status == AVAudioConverterOutputStatus_Error || !output.frameLength) return;
+    const uint8_t *pcm = output.audioBufferList->mBuffers[0].mData;
+    if (!pcm) return;
+    NSUInteger length = output.frameLength * sizeof(int16_t);
+    for (NSUInteger offset = 0; offset < length; offset += 1920) {
+        handler([NSData dataWithBytes:pcm + offset length:MIN((NSUInteger)1920, length - offset)]);
+    }
+}
+
 - (void)captureOutput:(AVCaptureOutput *)output didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
        fromConnection:(AVCaptureConnection *)connection {
     CVPixelBufferRef pixels = CMSampleBufferGetImageBuffer(sampleBuffer);
+    if (!pixels && [output isKindOfClass:AVCaptureAudioDataOutput.class]) {
+        [self sendMicrophoneSample:sampleBuffer];
+        return;
+    }
     void (^handler)(CVPixelBufferRef) = self.onFrame;
     if (pixels && handler) handler(pixels);
 }

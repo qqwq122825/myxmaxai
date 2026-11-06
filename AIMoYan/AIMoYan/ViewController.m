@@ -383,6 +383,7 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     self.connection = nil;
     connection.delegate = nil;
     [connection disconnect];
+    [self.camera stopMicrophone];
     [self.encoder invalidate];
     self.encoder = nil;
     [self.returnView reset];
@@ -413,6 +414,24 @@ typedef NS_ENUM(NSInteger, RGState) { RGStateIdle, RGStateConnecting, RGStateLiv
     [self.pendingServers removeAllObjects];
     [self setStatus:self.linkMode == RGLinkModeLAN ? @"局域网推流中 · 电脑接收端已连接" : @"推流中 · 换脸结果在电脑端接收"
               color:RG_OK];
+    if (connection.microphoneSupported) {
+        __weak typeof(self) weakSelf = self;
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) self = weakSelf;
+                if (!self || self.connection != connection) return;
+                if (!granted) {
+                    [self showToast:@"麦克风未授权，可在 iPhone 设置中开启"];
+                    return;
+                }
+                [self.camera startMicrophone:^(NSData *pcm) {
+                    [weakConnection sendMicrophonePCM:pcm];
+                } completion:^(BOOL started) {
+                    if (self.connection == connection && !started) [self showToast:@"手机麦克风启动失败"];
+                }];
+            });
+        }];
+    }
 }
 
 - (void)connection:(RGConnection *)connection returnActiveChanged:(BOOL)active {

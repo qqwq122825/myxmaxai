@@ -119,6 +119,8 @@ static NSError *RGUnreachable(NSString *message) {
 @property (atomic, readwrite) double rttMs;
 @property (atomic, readwrite) uint64_t sentFrames, sentBytes, receivedFrames, receivedBytes, droppedFrames;
 @property (atomic) NSInteger inFlight;
+@property (atomic, readwrite) BOOL microphoneSupported;
+@property (atomic) NSInteger audioInFlight;
 @property (atomic) BOOL closed;
 @property (atomic) BOOL pinMismatch;
 @end
@@ -176,6 +178,7 @@ static NSError *RGUnreachable(NSString *message) {
             [self failWith:RGError(self.localNetwork ? @"电脑接收端已经连着另一台手机，请先在那台手机上断开。"
                                                      : @"服务器已有其他推流设备连接，请先停止旧连接。")]; return;
         }
+        self.microphoneSupported = self.localNetwork && [features containsObject:@"lan-mic-pcm"];
         [self openStream];
     }];
     [health resume];
@@ -295,6 +298,24 @@ static NSError *RGUnreachable(NSString *message) {
         if (!self) return;
         @synchronized (self) { self.inFlight -= 1; }
         if (error) [self failWith:[self describeTransportError:error]];
+    }];
+}
+
+- (void)sendMicrophonePCM:(NSData *)pcm {
+    if (!pcm.length || pcm.length > 1920 || pcm.length % 2) return;
+    NSURLSessionWebSocketTask *socket = self.socket;
+    @synchronized (self) {
+        if (!self.ready || self.closed || !self.microphoneSupported || !socket ||
+            self.audioInFlight >= 3 || self.inFlight >= RGMaxInFlight) return;
+        self.audioInFlight += 1;
+    }
+    NSMutableData *message = [NSMutableData dataWithBytes:"RGA1" length:4];
+    [message appendData:pcm];
+    __weak typeof(self) weakSelf = self;
+    [socket sendMessage:[[NSURLSessionWebSocketMessage alloc] initWithData:message] completionHandler:^(NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (!self) return;
+        @synchronized (self) { self.audioInFlight -= 1; }
     }];
 }
 

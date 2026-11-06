@@ -15,7 +15,9 @@
 
 #define MAX_SHARED_IMAGE_SIZE (3840 * 2160 * 4 * sizeof(short)) //4K (RGBA max 16bit per pixel)
 
-#ifdef FACELIVE_VIDEO_TEST
+#ifdef FACELIVE_LAN_CAMERA
+#define CAPTURE_MEMORY_PREFIX "FaceLiveLan"
+#elif defined(FACELIVE_VIDEO_TEST)
 #define CAPTURE_MEMORY_PREFIX "FaceLiveVideoTest"
 #else
 #define CAPTURE_MEMORY_PREFIX "UnityCapture"

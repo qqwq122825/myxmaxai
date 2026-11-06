@@ -29,6 +29,9 @@ typedef NS_ENUM(NSInteger, RGQuality) {
 - (void)startWithPosition:(AVCaptureDevicePosition)position quality:(RGQuality)quality portrait:(BOOL)portrait
                completion:(void (^)(NSError *_Nullable error))completion;
 - (void)stop;
+/// Send signed 16-bit, 48 kHz mono PCM on the audio capture queue.
+- (void)startMicrophone:(void (^)(NSData *pcm))handler completion:(void (^)(BOOL started))completion;
+- (void)stopMicrophone;
 /// Restarts the session after -stop (e.g. after the QR scanner closed), keeping camera / quality.
 - (void)resume;
 - (void)switchCamera;

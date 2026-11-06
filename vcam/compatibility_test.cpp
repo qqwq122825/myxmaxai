@@ -10,16 +10,17 @@
 
 int wmain(int argc, wchar_t** argv)
 {
-    REQUIRE(argc == 2);
+    REQUIRE(argc == 2 || argc == 3);
     REQUIRE(SUCCEEDED(CoInitializeEx(NULL, COINIT_MULTITHREADED)));
     HMODULE dll = LoadLibraryW(argv[1]);
     REQUIRE(dll != NULL);
     typedef HRESULT (STDAPICALLTYPE* FactoryProc)(REFCLSID, REFIID, LPVOID*);
     FactoryProc getFactory = (FactoryProc)GetProcAddress(dll, "DllGetClassObject");
     REQUIRE(getFactory != NULL);
-    // Channel 2 (third device) is test-only, never registered and never used by the bridge.
+    // Default is the isolated third channel. An explicit CLSID can check a
+    // separately built camera variant, also without registering any device.
     CLSID clsid;
-    REQUIRE(SUCCEEDED(CLSIDFromString(L"{5C2CD55C-92AD-4999-8666-912BD3E70013}", &clsid)));
+    REQUIRE(SUCCEEDED(CLSIDFromString(argc == 3 ? argv[2] : L"{5C2CD55C-92AD-4999-8666-912BD3E70013}", &clsid)));
     IClassFactory* factory = NULL;
     REQUIRE(SUCCEEDED(getFactory(clsid, IID_IClassFactory, (void**)&factory)));
     IBaseFilter* source = NULL;
