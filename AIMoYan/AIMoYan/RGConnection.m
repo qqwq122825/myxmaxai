@@ -310,8 +310,10 @@ static NSError *RGUnreachable(NSString *message) {
     if (!pcm.length || pcm.length > 1920 || pcm.length % 2) return;
     NSURLSessionWebSocketTask *socket = self.socket;
     @synchronized (self) {
+        // Audio is tiny (2 KB per 20 ms) and every lost packet is an audible click, so it is not gated on
+        // the video queue (video drops frames instead). ~200 ms of audio may be in flight across a Wi-Fi hiccup.
         if (!self.ready || self.closed || !self.microphoneSupported || !socket ||
-            self.audioInFlight >= 3 || self.inFlight >= RGMaxInFlight) return;
+            self.audioInFlight >= 10) return;
         self.audioInFlight += 1;
     }
     NSMutableData *message = [NSMutableData dataWithBytes:"RGA1" length:4];

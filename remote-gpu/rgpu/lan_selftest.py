@@ -86,8 +86,9 @@ async def exercise(directory, width=1080, height=1920):
                 assert not played
                 monitor.start()
                 await ws.send_bytes(AUDIO_MAGIC + b"\x10")  # Invalid PCM must not reach the decoder.
-                await ws.send_bytes(AUDIO_MAGIC + pcm)
-                await eventually(lambda: played == [pcm])
+                for _ in range(6):  # 6 × 20 ms fills the 120 ms jitter buffer, then playback starts
+                    await ws.send_bytes(AUDIO_MAGIC + pcm)
+                await eventually(lambda: b"".join(played) == pcm * 6)
                 encoder = H264Encoder(settings)
                 image = np.zeros((height, width, 3), np.uint8)
                 image[:height // 2] = (15, 25, 220)
@@ -110,7 +111,7 @@ async def exercise(directory, width=1080, height=1920):
                 await ws.send_bytes(AUDIO_MAGIC + pcm)
                 await ws.send_json({"type": "ping", "time": 2})
                 assert await ws.receive_json(timeout=3) == {"type": "pong", "time": 2}
-                assert played == [pcm] and closed == [True]
+                assert b"".join(played) == pcm * 6 and closed == [True]
                 monitor.start()
             await eventually(lambda: not agent.busy)
             assert len(disconnects) == 1 and resets == [True]

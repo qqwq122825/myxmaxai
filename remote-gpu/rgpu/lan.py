@@ -28,7 +28,7 @@ from .media import FrameSink
 from .lan_audio import AUDIO_MAGIC, MAX_PCM_BYTES
 from .pairing import ConnectionKey, load_identity
 
-LAN_VERSION = "1.0.4"
+LAN_VERSION = "1.0.5"
 DEFAULT_PORT = 8767  # Does not take the existing remote bridge's default port.
 NETWORKS = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"))
 
